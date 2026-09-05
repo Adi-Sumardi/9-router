@@ -5,6 +5,34 @@ Versi sebelum 0.6.0 tidak memiliki catatan detail — lihat riwayat `.vsix` sebe
 sebagai referensi kasar (fitur Auto-Edit, Plan Mode, dan Model Routing Pool diperkenalkan
 bertahap dari 0.1.0 sampai 0.5.0).
 
+## 0.11.0 — Five Community Skills Baked Into the System Prompt
+
+Added condensed, faithful directives distilled from five external skills into
+`AgentEngine.getSystemPrompt()` — SendaGo has no dynamic skill-loading system like Claude
+Code's `.claude/skills/`, so these are folded directly into the always-sent base prompt
+rather than installed as separate loadable files. `no-ai-slop` and `unslop` were merged
+into one consolidated writing-style directive since both target the same problem (AI-sounding
+prose) and duplicating near-identical rules would only waste prompt tokens.
+
+- **Directive #1 (enhanced)** — [DietrichGebert/Ponytail](https://github.com/DietrichGebert/Ponytail):
+  explicit 7-rung decision hierarchy before writing new code (does it need to exist? →
+  reuse → stdlib → platform-native → existing dependency → one-liner → new minimal
+  implementation), replacing the vaguer "avoid over-engineering" line. Validation, error
+  handling, security, and accessibility are called out as non-negotiable at every rung.
+- **Directive #3 (new)** — [petergyang/no-ai-slop](https://github.com/petergyang/no-ai-slop) +
+  [MohamedAbdallah-14/unslop](https://github.com/MohamedAbdallah-14/unslop): a concrete
+  list of AI-sounding patterns to avoid in every response (throat-clearing openers, forced
+  binary contrasts, stock vocabulary like "seamless"/"pivotal", unattributed claims,
+  pseudo-profound closers, monotone sentence rhythm) plus what to do instead.
+- **Directive #12 (new, scoped)** — [nateherkai/scroll-craft](https://github.com/nateherkai/scroll-craft):
+  scroll-driven web animation principles (scroll as timeline, one bespoke interaction per
+  site, feeling-curve design, strict typography/spacing, real depth techniques) — only
+  meant to engage when the user explicitly asks for a scroll-animated site.
+- **Directive #13 (new, scoped)** — [nextlevelbuilder/ui-ux-pro-max-skill](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill):
+  condensed UI/UX workflow (infer product context → respect existing design-system files →
+  establish tokens before per-component styling) and non-negotiable accessibility minimums
+  (WCAG contrast, keyboard nav, 44×44px touch targets) — scoped to actual UI/design tasks.
+
 ## 0.10.0 — Real Multi-Model Fallback (Sonnet 5 High / Free Tier / Hybrid / Pro)
 
 ### Analysis
