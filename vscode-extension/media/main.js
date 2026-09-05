@@ -716,6 +716,13 @@ window.addEventListener('message', (event) => {
       handleStartFinalSummary();
       break;
 
+    case 'resetCurrentBubble':
+      // Model yang lagi dicoba drop di tengah stream (fallback ke model lain) — bersihkan
+      // teks parsial yang sempat tampil supaya tidak tercampur dengan jawaban model
+      // berikutnya yang akan mengisi bubble yang sama.
+      if (currentAssistantBubble) resetBubbleToLoading(currentAssistantBubble);
+      break;
+
     case 'taskCompleted':
       handleTaskCompleted(message.summary);
       break;
@@ -1158,25 +1165,29 @@ function createAssistantMessage() {
   msg.className = 'message assistant';
   const content = document.createElement('div');
   content.className = 'message-content';
-  content.innerHTML = `
+  msg.appendChild(content);
+  messagesContainer.appendChild(msg);
+  autoScrollIfNearBottom();
+
+  const bubble = { elem: msg, contentElem: content, rawText: '', loaderTextElem: null };
+  resetBubbleToLoading(bubble);
+  return bubble;
+}
+
+// Kembalikan sebuah bubble (baru atau yang sudah mulai ter-isi teks) ke tampilan loading
+// awal — dipakai saat model pertama drop di tengah stream dan sistem otomatis mencoba
+// model fallback berikutnya, supaya teks parsial dari model yang gagal tidak tercampur
+// dengan jawaban model berikutnya di bubble yang sama.
+function resetBubbleToLoading(bubble) {
+  bubble.rawText = '';
+  bubble.contentElem.innerHTML = `
     <div class="claude-loader">
       <div class="claude-shimmer-dot"></div>
       <span class="claude-loader-text">${THINKING_MESSAGES[0]}</span>
     </div>
   `;
-  msg.appendChild(content);
-  messagesContainer.appendChild(msg);
-  autoScrollIfNearBottom();
-
-  const loaderText = content.querySelector('.claude-loader-text');
-  startThinkingProgress(loaderText);
-
-  return {
-    elem: msg,
-    contentElem: content,
-    rawText: '',
-    loaderTextElem: loaderText
-  };
+  bubble.loaderTextElem = bubble.contentElem.querySelector('.claude-loader-text');
+  startThinkingProgress(bubble.loaderTextElem);
 }
 
 function appendAssistantDirectMessage(markdownText) {

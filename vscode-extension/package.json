@@ -2,7 +2,7 @@
   "name": "sendago-ai-assistant",
   "displayName": "SendaGo AI — 9Router Assistant (Claude Code & Antigravity Edition)",
   "description": "Autonomous Claude Code & Cline Style AI Coding Assistant: Surgical Replace, Grep & Glob Search, Persistent Shell, and Multi-Model Fusion powered by 9Router",
-  "version": "0.9.5",
+  "version": "0.10.0",
   "private": true,
   "license": "UNLICENSED",
   "publisher": "sendago",

@@ -107,6 +107,77 @@ export class NineRouterClient {
     }
   }
 
+  private _modelsCache: { list: string[]; fetchedAt: number } | null = null;
+  private static readonly MODELS_CACHE_TTL_MS = 60000;
+
+  /** getAvailableModels() di-cache singkat — dipanggil setiap awal turn untuk membangun
+   *  fallback chain, jadi tidak perlu hit /v1/models berkali-kali per detik. */
+  private async getCachedModels(): Promise<string[]> {
+    if (this._modelsCache && Date.now() - this._modelsCache.fetchedAt < NineRouterClient.MODELS_CACHE_TTL_MS) {
+      return this._modelsCache.list;
+    }
+    const list = await this.getAvailableModels();
+    this._modelsCache = { list, fetchedAt: Date.now() };
+    return list;
+  }
+
+  /**
+   * Klasifikasi kasar model berdasarkan pola nama ID-nya saja (9Router tidak mengekspos
+   * metadata tier/biaya lewat /v1/models, cuma {id, owned_by}) — dipakai untuk menyusun
+   * urutan fallback yang masuk akal per pool. Ini heuristik, bukan sumber kebenaran:
+   * kalau nama model di gateway Anda tidak cocok pola ini, dia jatuh ke 'other' dan tetap
+   * ikut di fallback chain, cuma urutannya mungkin kurang optimal.
+   */
+  private categorizeModel(id: string): 'free' | 'pro' | 'other' {
+    const lower = id.toLowerCase();
+    if (/\bfree\b|groq|gemma|flash-free/.test(lower)) return 'free';
+    if (/unlimited|\bpro\b|opus|sonnet|gpt-4|\bo3\b|\br1\b|deepseek/.test(lower)) return 'pro';
+    return 'other';
+  }
+
+  /**
+   * Bangun daftar model fallback untuk satu pool — BUKAN cuma satu model ID seperti
+   * resolveModelForPool(). Diambil dari model yang BENERAN aktif di gateway Anda
+   * (/v1/models), jadi kalau Anda mengaktifkan banyak provider, semuanya jadi kandidat
+   * fallback nyata — bukan cuma satu alias tetap yang selama ini dikirim.
+   *
+   * Urutan per pool (heuristik berdasarkan ARCHITECTURE.md):
+   * - `pro`: primary -> model 'pro' lain -> lainnya. TIDAK fallback ke 'free' sama sekali
+   *   (paid/* pool tidak boleh turun ke model gratisan yang kualitasnya lebih rendah).
+   * - `free`: primary -> model 'free' lain -> lainnya -> 'pro' (usaha terakhir).
+   * - `hybrid`: primary -> 'pro' -> lainnya -> 'free' (cascade subscription -> murah -> free).
+   * - lainnya (mis. Sonnet 5 High/fusion): primary -> semua model lain, tanpa preferensi tier.
+   */
+  public async resolveModelChainForPool(poolOverride?: string): Promise<string[]> {
+    const primary = this.resolveModelForPool(poolOverride);
+    const pool = (poolOverride || this.modelPool || '').toLowerCase();
+
+    let available: string[];
+    try {
+      available = await this.getCachedModels();
+    } catch {
+      available = [];
+    }
+
+    const others = available.filter(m => m !== primary);
+    if (others.length === 0) return [primary];
+
+    const free = others.filter(m => this.categorizeModel(m) === 'free');
+    const pro = others.filter(m => this.categorizeModel(m) === 'pro');
+    const rest = others.filter(m => this.categorizeModel(m) === 'other');
+
+    if (pool === 'pro' || pool === 'paid' || pool === 'claude') {
+      return [primary, ...pro, ...rest];
+    }
+    if (pool === 'free' || pool === 'free-coding') {
+      return [primary, ...free, ...rest, ...pro];
+    }
+    if (pool === 'hybrid' || pool === 'hybrid-coding') {
+      return [primary, ...pro, ...rest, ...free];
+    }
+    return [primary, ...rest, ...pro, ...free];
+  }
+
   /**
    * @param tools Skema tool OpenAI-compatible (opsional). Model/provider yang mendukung
    *   native function-calling akan membalas lewat `delta.tool_calls` alih-alih teks tag

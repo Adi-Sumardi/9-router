@@ -5,6 +5,42 @@ Versi sebelum 0.6.0 tidak memiliki catatan detail — lihat riwayat `.vsix` sebe
 sebagai referensi kasar (fitur Auto-Edit, Plan Mode, dan Model Routing Pool diperkenalkan
 bertahap dari 0.1.0 sampai 0.5.0).
 
+## 0.10.0 — Real Multi-Model Fallback (Sonnet 5 High / Free Tier / Hybrid / Pro)
+
+### Analysis
+User asked why "Sonnet 5 High" and "Free Tier" never fell back beyond a single model
+despite having many providers enabled on their 9Router gateway. The answer was in the
+code: `resolveModelForPool()` mapped every pool to exactly one hardcoded model ID string
+(`claude-sonnet-5-fusion`, `free-coding`, `claude-virtually-unlimited`) — the extension
+sent that one string per request with zero retry-to-a-different-model logic anywhere.
+Any cross-model fallback that appeared to happen was entirely up to how the *gateway*
+interpreted that specific model ID server-side, invisible to and uncontrolled by this
+extension. Also found: "Hybrid" and "Sonnet 5 High" resolved to the identical model ID
+(likely an unintentional duplicate — ARCHITECTURE.md describes Hybrid as a distinct
+subscription→cheap→free cascade). Separately, the plumbing to fetch the real list of
+active models (`getAvailableModels()` → `/v1/models`) already existed but was wired to a
+no-op on the client side, deliberately disabled per an existing code comment ("Model
+spesifik dihilangkan agar dropdown rapi").
+
+### Added
+- `NineRouterClient.resolveModelChainForPool()` builds an actual ordered list of fallback
+  candidates per pool from the models really active on the gateway (cached 60s), instead
+  of a single fixed ID. Candidates are loosely categorized as `free`/`pro`/`other` by
+  name pattern (`/v1/models` doesn't expose real tier metadata) to order the chain
+  sensibly per pool's documented intent:
+  - `pro`: primary → other pro-ish models. Never falls back to a free-tier model.
+  - `free`: primary → other free-ish models → everything else → pro (last resort).
+  - `hybrid`: primary → pro → everything else → free (subscription → cheap → free).
+  - everything else (Sonnet 5 High/fusion): primary → all other active models, broad.
+- `SendaGoSidebarProvider.streamChatWithFallback()` walks that chain, automatically
+  retrying with the next candidate on any non-abort error (network, timeout, HTTP error)
+  and remembering which candidate last succeeded so subsequent autonomous-loop steps
+  don't re-try a model already known to be down. Surfaces a visible
+  `"⚠️ Model X tidak merespons — otomatis beralih ke Y"` message when a fallback occurs.
+  A partially-streamed response from a failing model is cleared from the bubble
+  (`resetCurrentBubble`) before the next candidate's text starts filling it, so output
+  from two different models never gets concatenated together.
+
 ## 0.9.5 — Fix: Lock Was Set Too Late, After Two Internal Auto-Scrolls Already Fired
 
 Follow-up to 0.9.4: the lock itself was correct, but it was still being armed *after* the

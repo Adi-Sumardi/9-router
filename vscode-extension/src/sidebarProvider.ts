@@ -440,6 +440,65 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Coba `streamChat` ke tiap kandidat di `modelChain` berurutan mulai dari
+   * `chainState.index` — kalau satu kandidat gagal (network/timeout/HTTP error, BUKAN
+   * user klik Stop), otomatis lanjut ke kandidat berikutnya. `chainState.index` diupdate
+   * ke kandidat yang BERHASIL, supaya iterasi loop otonom SELANJUTNYA langsung mulai dari
+   * situ lagi (tidak perlu coba ulang model yang sudah terbukti mati tiap giliran).
+   *
+   * Ini yang menggantikan perilaku lama "cuma kirim satu model ID tetap" — sekarang
+   * benar-benar mencoba model lain yang aktif di gateway kalau kandidat pertama bermasalah.
+   */
+  private async streamChatWithFallback(
+    modelChain: string[],
+    chainState: { index: number },
+    onChunk: (text: string) => void,
+    controller: AbortController,
+    tools?: import('./toolSchemas').ToolDefinition[]
+  ): Promise<{ text: string; toolCalls: ToolCallData[] }> {
+    const startIndex = chainState.index;
+    let lastErr: unknown = null;
+
+    for (let i = startIndex; i < modelChain.length; i++) {
+      const attemptModel = modelChain[i];
+      let attemptedAnyChunk = false;
+
+      try {
+        const result = await this._client.streamChat(
+          this._history,
+          attemptModel,
+          (chunk) => {
+            attemptedAnyChunk = true;
+            onChunk(chunk);
+          },
+          controller.signal,
+          tools
+        );
+        chainState.index = i;
+        if (i > startIndex) {
+          this._view?.webview.postMessage({
+            type: 'assistantMessage',
+            text: `⚠️ **Model \`${modelChain[startIndex]}\` tidak merespons** — otomatis beralih ke \`${attemptModel}\`.`
+          });
+        }
+        return result;
+      } catch (err: any) {
+        if (err?.name === 'AbortError') throw err; // User klik Stop — jangan di-fallback, propagate langsung.
+        lastErr = err;
+        if (attemptedAnyChunk) {
+          // Sebagian teks sempat ter-stream dari model yang gagal ini sebelum putus di
+          // tengah jalan — bersihkan bubble di client supaya tidak tercampur dengan teks
+          // dari model berikutnya yang akan dicoba.
+          this._view?.webview.postMessage({ type: 'resetCurrentBubble' });
+        }
+        // Lanjut ke kandidat berikutnya di chain.
+      }
+    }
+
+    throw lastErr instanceof Error ? lastErr : new Error('Semua model dalam fallback chain gagal merespons.');
+  }
+
+  /**
    * Fingerprint dari SEMUA aksi yang diminta model pada satu turn — dipakai untuk
    * mendeteksi stagnasi (model mengulang tool call PERSIS SAMA berkali-kali tanpa
    * progres nyata, mis. grep/find dengan query yang identik). Ini pengganti "hitung
@@ -473,7 +532,12 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
    * kotak peringatan mentah. `reason` disisipkan ke directive supaya modelnya paham
    * KENAPA harus berhenti sekarang dan bisa menjelaskannya ke user kalau relevan.
    */
-  private async runFinalSummaryTurn(targetModel: string, controller: AbortController, reason: string): Promise<void> {
+  private async runFinalSummaryTurn(
+    modelChain: string[],
+    chainState: { index: number },
+    controller: AbortController,
+    reason: string
+  ): Promise<void> {
     this._history.push({
       role: 'user',
       content: `[Directive: Stop calling any tools now. ${reason} In natural Indonesian, summarize clearly what has been accomplished/found so far, your conclusion, and any remaining next steps the user should take. Respond with plain text only — no tool calls, no <sendago_*> tags.]`,
@@ -484,19 +548,22 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
 
     let summaryText = '';
     try {
-      await this._client.streamChat(
-        this._history,
-        targetModel,
+      // Sengaja TIDAK kirim `tools` — memaksa provider membalas teks biasa. Tetap lewat
+      // streamChatWithFallback supaya giliran ringkasan ini juga tangguh kalau kandidat
+      // model yang lagi aktif ternyata drop di momen akhir ini.
+      const result = await this.streamChatWithFallback(
+        modelChain,
+        chainState,
         (chunk) => {
-          summaryText += chunk;
           this._view?.webview.postMessage({ type: 'chunk', text: chunk });
         },
-        controller.signal
-        // Sengaja TIDAK kirim `tools` — memaksa provider membalas teks biasa.
+        controller
       );
+      summaryText = result.text;
     } catch {
-      // Kalau giliran ringkasan ini sendiri gagal, jangan biarkan seluruh turn crash —
-      // fallback teks di bawah tetap memastikan user tidak melihat layar kosong.
+      // Kalau giliran ringkasan ini sendiri gagal (termasuk seluruh fallback chain habis),
+      // jangan biarkan seluruh turn crash — fallback teks di bawah tetap memastikan user
+      // tidak melihat layar kosong.
     }
 
     if (!summaryText.trim()) {
@@ -590,7 +657,11 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
     this._history.push({ role: 'user', content: promptText });
 
     const isClaudeCode = this._currentMode === 'claude-code' || this._currentMode === 'agent';
-    const targetModel = this._client.resolveModelForPool(pool);
+    // Fallback nyata: bukan cuma satu model ID tetap, tapi daftar kandidat dari model yang
+    // BENERAN aktif di gateway (lihat resolveModelChainForPool) — kalau kandidat pertama
+    // gagal/timeout, streamChatWithFallback() otomatis lanjut ke kandidat berikutnya.
+    const modelChain = await this._client.resolveModelChainForPool(pool);
+    const modelChainState = { index: 0 };
 
     // Permission mode: .sendago/settings.json milik REPO (bisa di-commit, berlaku untuk
     // semua kontributor) menang atas setting personal `sendago.autoExecute` di VS Code —
@@ -650,16 +721,19 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
         // function-calling akan balas lewat toolCalls terstruktur; provider yang tidak
         // mendukungnya akan mengabaikan field ini dan tetap balas teks tag <sendago_*>
         // (jalur fallback parseFileEdits/dst di bawah tetap berjalan seperti sebelumnya).
-        const { toolCalls: rawToolCalls } = await this._client.streamChat(
-          this._history,
-          targetModel,
+        // streamChatWithFallback mencoba modelChain berurutan kalau kandidat pertama gagal
+        // (lihat method-nya) — fullResponse diambil dari return value (bukan diakumulasi
+        // manual di sini) supaya tidak tercampur dengan chunk dari attempt yang gagal.
+        const { text: streamedText, toolCalls: rawToolCalls } = await this.streamChatWithFallback(
+          modelChain,
+          modelChainState,
           (chunk) => {
-            fullResponse += chunk;
             this._view?.webview.postMessage({ type: 'chunk', text: chunk });
           },
-          controller.signal,
+          controller,
           getToolDefinitionsForMode(this._currentMode)
         );
+        fullResponse = streamedText;
 
         const isNativeToolCall = rawToolCalls.length > 0;
 
@@ -1001,7 +1075,8 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
 
         if (isStagnant) {
           await this.runFinalSummaryTurn(
-            targetModel,
+            modelChain,
+            modelChainState,
             controller,
             'You have repeated the exact same tool call multiple times in a row without making new progress.'
           );
@@ -1010,7 +1085,8 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
 
         if (stepLimitHit) {
           await this.runFinalSummaryTurn(
-            targetModel,
+            modelChain,
+            modelChainState,
             controller,
             `You have used all ${maxSteps} available autonomous steps for this task.`
           );
