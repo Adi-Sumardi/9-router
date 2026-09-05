@@ -1692,14 +1692,14 @@ function renderCommandCards(commands, autoApplied) {
     return;
   }
 
-  if (autoMode) {
-    commands.forEach(cmd => {
-      appendAutoExecToast('⚡', `Auto-run: ${cmd.command}`);
-      vscode.postMessage({ type: 'runCommand', command: cmd.command, requestId: `auto_${Date.now()}_${Math.random().toString(36).slice(2)}` });
-    });
-    return;
-  }
-
+  // CATATAN: dulu di sini ada jalur "kalau autoMode, langsung jalankan sendiri dari client".
+  // Itu sumber inkonsistensi nyata: keputusan boleh-tidaknya eksekusi otomatis ada di server
+  // (writeExecAllowed = mode agent + permission auto + workspace trusted). Ketika server
+  // memutuskan TIDAK mengeksekusi, dia sudah memberi tahu model "belum dieksekusi" — tapi
+  // client tetap menjalankannya karena toggle Auto menyala. Model jadi bekerja dengan
+  // gambaran yang salah dan bisa mengulang perintah yang sama. Sekarang server adalah satu-
+  // satunya yang mengeksekusi; kalau dia tidak menjalankannya, user yang memutuskan lewat
+  // kartu di bawah.
   actionsPanel.style.display = 'flex';
   const container = document.createElement('div');
   container.className = 'compact-actions-list';
@@ -1953,21 +1953,10 @@ function resolveReplaceApplied(message) {
 }
 
 function renderImageCards(images) {
-  if (autoMode) {
-    images.forEach(img => {
-      appendAutoExecToast('🖼️', `Auto-generate: ${img.filePath}`);
-      vscode.postMessage({
-        type: 'generateImage',
-        filePath: img.filePath,
-        prompt: img.prompt,
-        width: img.width || 1024,
-        height: img.height || 1024,
-        requestId: `autoimg_${Date.now()}`
-      });
-    });
-    return;
-  }
-
+  // Sama seperti renderCommandCards: jalur auto-generate dari sisi client dihapus. Server
+  // memang tidak pernah membuat gambar otomatis dan sudah memberi tahu model bahwa gambarnya
+  // "menunggu konfirmasi user" — kalau client diam-diam membuatnya, informasi yang dipegang
+  // model jadi salah. Sekarang selalu lewat kartu, sesuai dengan apa yang diberitahukan.
   actionsPanel.style.display = 'flex';
   const container = document.createElement('div');
   container.className = 'compact-actions-list';

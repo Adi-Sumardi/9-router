@@ -5,6 +5,45 @@ Versi sebelum 0.6.0 tidak memiliki catatan detail — lihat riwayat `.vsix` sebe
 sebagai referensi kasar (fitur Auto-Edit, Plan Mode, dan Model Routing Pool diperkenalkan
 bertahap dari 0.1.0 sampai 0.5.0).
 
+## 0.14.0 — Systematic Audit of the Autonomous Loop: 5 Bugs Fixed
+
+Instead of patching one reported symptom at a time, the whole loop was read through and
+traced. Several findings came from changes made in 0.12.x–0.13.x.
+
+### Fixed (critical)
+- **Actions bundled with `task_done` in the same turn were silently dropped while the UI
+  claimed they had been applied.** The `done` check sat *before* the execution block, so a
+  very common model response — `replace_in_file` **plus** `task_done` ("here's the fix,
+  we're done") — hit `break` before anything was written. Worse, the UI had already been
+  sent `autoApplied: true`, so the client skipped rendering a manual card too: the change
+  vanished with no trace while a "task complete" badge appeared. This is what made runs
+  consistently stop mid-execution with a conclusion attached. `task_done` is now handled
+  *after* every action in the turn has actually run.
+- When the model declares completion in Ask mode while write actions are still awaiting
+  approval, the completion badge is replaced by an explicit warning that changes are still
+  pending — the task genuinely isn't finished.
+
+### Fixed (important)
+- **Auto-compaction was a no-op on the native tool-calling path.** It only rewrote
+  `role: 'user'` messages matching legacy text patterns, but on the native path all the bulk
+  (file contents up to 15,000 chars per read, grep output, command output) lives in
+  `role: 'tool'` messages, which it never touched — so history grew until it hit the model's
+  context limit. Tool results are now truncated too. Logic moved to `historyCompaction.ts`
+  as a pure function with 7 tests, including one that locks the invariant that matters most:
+  compaction may only shorten content, never drop a message, or a `tool_calls` entry loses
+  its pair and the next request is rejected.
+- **Commands could execute twice, and the model was told the opposite of what happened.**
+  In Chat mode the server skips execution and reports "not executed" to the model, but the
+  client auto-ran the command anyway whenever the Auto toggle was on. The client-side
+  auto-run path is removed for both commands and image generation — the server is now the
+  only thing that executes, so what the model is told always matches reality.
+
+### Fixed (moderate)
+- The final summary no longer goes to the light model when light rotation has already been
+  disabled for misbehaving in that turn.
+- The consecutive-light-step budget is only consumed by steps the light model actually
+  completed, not by ones the guard handed back to the primary model.
+
 ## 0.13.2 — Fix: Cheap Model Could Declare the Whole Task Finished Halfway Through
 
 Reported: work consistently stopped mid-execution and jumped straight to a summary.

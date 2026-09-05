@@ -7,6 +7,7 @@ import { AgentTools } from './agentTools';
 import { SessionManager, sanitizeMessagesForHistory } from './sessionManager';
 import { getToolDefinitionsForMode } from './toolSchemas';
 import { ProjectSettings, PermissionMode } from './projectSettings';
+import { compactHistory } from './historyCompaction';
 
 export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'sendago.sidebarView';
@@ -627,46 +628,14 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Pangkas log eksekusi tool lama agar context window tetap hemat dan responsif (Auto-Compaction)
+   * Pangkas log eksekusi tool lama agar context window tetap hemat dan responsif
+   * (Auto-Compaction). Logikanya ada di historyCompaction.ts sebagai fungsi murni supaya
+   * bisa diuji — invariant "jangan pernah menghapus pesan, hanya memendekkan isinya"
+   * kritis di sini: menghapus pesan `tool` akan memutus pasangan tool_calls dan membuat
+   * request berikutnya ditolak provider.
    */
   private compactHistoryIfLarge(): void {
-    if (this._history.length <= 6) return;
-
-    // Hitung total karakter konten riwayat
-    const totalChars = this._history.reduce((acc, m) => acc + (m.content?.length || 0), 0);
-    if (totalChars < 25000) return;
-
-    // Pertahankan: index 0 (system prompt), index 1 (prompt asli user), dan 3 pesan terakhir
-    const keepLastCount = 3;
-    const startIndex = 2;
-    const endIndex = this._history.length - keepLastCount;
-
-    for (let i = startIndex; i < endIndex; i++) {
-      const msg = this._history[i];
-      if (msg.role === 'user' && typeof msg.content === 'string') {
-        // Ringkas output terminal lama yang berhasil
-        if (msg.content.includes('[Observed Command Output]')) {
-          msg.content = msg.content.replace(
-            /\[Observed Command Output\]\s*\$ ([^\n]+)\s*Status: Success[^\n]*\nOutput:\s*```[\s\S]*?```/g,
-            '[Past Command: "$1" completed successfully]'
-          );
-        }
-        // Pangkas pembacaan file lama yang sudah berlalu
-        if (msg.content.includes('[File Content:')) {
-          msg.content = msg.content.replace(
-            /\[File Content: ([^\]]+)\]\s*```[\s\S]*?```/g,
-            '[File "$1" was previously inspected]'
-          );
-        }
-        // Pangkas hasil pencarian grep lama
-        if (msg.content.includes('[Workspace Grep Search')) {
-          msg.content = msg.content.replace(
-            /\[Workspace Grep Search for "[^"]+" \(\d+ matches\)\]:[\s\S]*?(?=\n\[|$)/g,
-            '[Prior Grep search completed]'
-          );
-        }
-      }
-    }
+    compactHistory(this._history);
   }
 
   public async handleUserPrompt(
@@ -894,15 +863,12 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
           this._view.webview.postMessage({ type: 'commandsDetected', commands, autoApplied: isClaudeCode && autoExecuteAllowed });
         }
 
-        // Jika model mengindikasikan task selesai
-        if (done) {
-          this._view.webview.postMessage({ type: 'taskCompleted', summary: done.summary });
-          if (isNativeToolCall) {
-            if (done.toolCallId) toolResultById.set(done.toolCallId, 'Task marked done and acknowledged.');
-            this.pushNativeToolResults(rawToolCalls, toolResultById, 'Not executed — task was already marked done in this turn.');
-          }
-          break;
-        }
+        // CATATAN: penanganan `task_done` sengaja ditaruh SETELAH blok eksekusi di bawah.
+        // Sebelumnya dicek di sini, dan itu bug serius: model sering membalas aksi tulis
+        // BARENGAN task_done dalam satu giliran ("ini perbaikannya, selesai"). Karena `break`
+        // terjadi sebelum blok eksekusi, perubahannya tidak pernah ditulis ke file — padahal
+        // UI sudah terlanjur diberi tahu `autoApplied: true` sehingga kartu manual pun tidak
+        // muncul. Hasilnya perubahan hilang total tapi badge "tugas selesai" tetap tampil.
 
         // Aksi tulis/eksekusi (replace, edit, command) HANYA auto-jalan di mode
         // Claude Code/Agent dengan autoExecute diizinkan — selain itu cukup tampil
@@ -1119,6 +1085,26 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
           }
         }
 
+        // Model menyatakan task selesai — diproses SETELAH semua aksi di giliran ini benar-benar
+        // dijalankan, supaya perubahan yang dibundel bersama task_done tetap diterapkan.
+        if (done) {
+          const pendingManualActions = !writeExecAllowed && this.hasWriteOrExecAction(parsed);
+          if (pendingManualActions) {
+            // Jangan klaim "selesai" kalau masih ada perubahan yang menunggu persetujuan user.
+            this._view.webview.postMessage({
+              type: 'assistantMessage',
+              text: `⚠️ Model menyatakan pekerjaan selesai, tapi masih ada perubahan yang menunggu persetujuan Anda di atas — tinjau dan terapkan dulu agar benar-benar rampung.\n\n${done.summary}`
+            });
+          } else {
+            this._view.webview.postMessage({ type: 'taskCompleted', summary: done.summary });
+          }
+          if (isNativeToolCall) {
+            if (done.toolCallId) toolResultById.set(done.toolCallId, 'Task marked done and acknowledged.');
+            this.pushNativeToolResults(rawToolCalls, toolResultById, 'OK — tidak ada output.');
+          }
+          break;
+        }
+
         // Jika tidak ada tool yang perlu dieksekusi, loop selesai
         if (!executedAny) {
           if (isNativeToolCall) {
@@ -1149,7 +1135,10 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
         // Batasi berapa giliran beruntun yang boleh dipegang model ringan. Tanpa ini, task
         // yang eksplorasinya panjang bisa berlarut-larut di model murah dan terasa lambat
         // "mulai mengerjakan"; setelah batas ini, kembalikan kemudi ke model utama.
-        consecutiveLightSteps = useLightModel ? consecutiveLightSteps + 1 : 0;
+        // Hanya dihitung kalau langkahnya BENAR-BENAR dikerjakan model ringan. Kalau guard
+        // menolak percobaannya dan langkahnya diulang model utama, jatah tidak boleh terpakai.
+        const lightStepActuallyUsed = useLightModel && !lightAttemptOverreached;
+        consecutiveLightSteps = lightStepActuallyUsed ? consecutiveLightSteps + 1 : 0;
         const lightBudgetLeft = consecutiveLightSteps < MAX_CONSECUTIVE_LIGHT_STEPS;
         nextStepIsLight = didReadOnlyOnly && !stepHadFailure && lightBudgetLeft;
 
@@ -1202,12 +1191,18 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
           });
         }
 
+        // Giliran ringkasan = murni merangkum apa yang sudah terjadi, tidak menulis kode dan
+        // tidak memanggil tool — cukup pakai lightChain supaya tidak boros token. KECUALI
+        // kalau rotasi ringan sudah dimatikan karena model ringan terbukti tidak bisa
+        // diandalkan di giliran ini; percuma menyerahkan kesimpulan akhir ke model yang
+        // barusan berkali-kali salah ambil keputusan.
+        const summaryChain = lightRotationDisabled ? modelChain : modelPlan.lightChain;
+        const summaryChainState = lightRotationDisabled ? modelChainState : lightChainState;
+
         if (isStagnant) {
-          // Giliran ringkasan = murni merangkum apa yang sudah terjadi, tidak menulis kode
-          // dan tidak memanggil tool — cukup pakai lightChain supaya tidak boros token.
           await this.runFinalSummaryTurn(
-            modelPlan.lightChain,
-            lightChainState,
+            summaryChain,
+            summaryChainState,
             controller,
             'You have repeated the exact same tool call multiple times in a row without making new progress.'
           );
@@ -1215,11 +1210,9 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
         }
 
         if (stepLimitHit) {
-          // Giliran ringkasan = murni merangkum apa yang sudah terjadi, tidak menulis kode
-          // dan tidak memanggil tool — cukup pakai lightChain supaya tidak boros token.
           await this.runFinalSummaryTurn(
-            modelPlan.lightChain,
-            lightChainState,
+            summaryChain,
+            summaryChainState,
             controller,
             `You have used all ${maxSteps} available autonomous steps for this task.`
           );
