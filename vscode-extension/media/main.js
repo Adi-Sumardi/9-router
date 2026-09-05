@@ -98,6 +98,36 @@ const MODEL_NAMES = {
   'free': 'Free Tier'
 };
 
+// Maskot SendaGo dipakai sebagai indikator "sedang bekerja" di semua titik tunggu
+// (menyusun jawaban, menulis file, menjalankan perintah) — menggantikan titik abu-abu
+// statis yang bikin UI terlihat diam padahal prosesnya masih jalan. Tiap pose adalah file
+// terpisah hasil potong sprite sheet maskot.png (media/mascot/mascot-NN.png).
+const MASCOT_DIR = document.body?.dataset?.mascotDir || '';
+
+function mascotSrc(pose) {
+  if (!MASCOT_DIR) return '';
+  return `${MASCOT_DIR}/mascot-${String(pose).padStart(2, '0')}.png`;
+}
+
+function mascotHtml(sizeClass, pose) {
+  const src = mascotSrc(pose || 1);
+  if (!src) {
+    // Kalau URI maskot tidak tersedia, jatuh ke titik shimmer lama supaya tetap ada
+    // tanda hidup — jangan sampai malah tidak ada indikator sama sekali.
+    return '<div class="claude-shimmer-dot"></div>';
+  }
+  return `<img src="${src}" class="sendago-mascot ${sizeClass || ''}" alt="" aria-hidden="true">`;
+}
+
+function mascotLoaderHtml(text, pose) {
+  return `
+    <div class="claude-loader">
+      ${mascotHtml('', pose)}
+      <span class="claude-loader-text">${escapeHtml(text || '')}</span>
+    </div>
+  `;
+}
+
 // Auto-scroll pintar: HANYA ikut ke bawah kalau viewport memang sudah dekat bawah.
 // Dulu setiap toast/terminal-block/chunk baru langsung memaksa scroll ke paling bawah —
 // akibatnya, prompt yang BARU SAJA dikirim user (biasanya masih terlihat di dekat bawah
@@ -761,6 +791,18 @@ window.addEventListener('message', (event) => {
       if (currentAssistantBubble) {
         currentAssistantBubble.rawText += message.text;
         currentAssistantBubble.contentElem.innerHTML = renderCleanChat(currentAssistantBubble.rawText, false);
+        // Maskot & labelnya ikut menjelaskan apa yang sedang dikerjakan — begitu model
+        // mulai menulis file, kunci ke pose "mengetik di laptop" dengan nama file yang
+        // sedang ditulis, alih-alih rotasi teks "berpikir" yang generik.
+        const writingFile = detectWritingFileName(currentAssistantBubble.rawText);
+        if (writingFile) {
+          stopThinkingProgress();
+          applyMascotState(
+            currentAssistantBubble.workingElem,
+            POSE_WRITING_CODE,
+            `Sedang menyusun ${getShortPath(writingFile)}...`
+          );
+        }
         autoScrollIfNearBottom();
       }
       break;
@@ -882,6 +924,7 @@ window.addEventListener('message', (event) => {
       stopThinkingProgress();
       if (agentLoopPill) agentLoopPill.style.display = 'none';
       if (currentAssistantBubble) {
+        currentAssistantBubble.workingElem?.remove();
         currentAssistantBubble.contentElem.innerHTML = renderCleanChat(currentAssistantBubble.rawText, true);
         attachCodeBlockActions(currentAssistantBubble.contentElem);
         currentAssistantBubble.contentElem.innerHTML += `<div class="stopped-badge">⏹ Dihentikan</div>`;
@@ -1145,43 +1188,64 @@ function appendUserMessage(text, attachments) {
   return msg;
 }
 
-const THINKING_MESSAGES = [
-  'Sedang berpikir...',
-  'Menganalisis...',
-  'Memahami konteks...',
-  'Mencari solusi...',
-  'Menyusun jawaban...',
-  'Memeriksa kembali...',
-  'Menyempurnakan...',
-  'Hampir selesai...'
+// Tiap tahap "sedang bekerja" punya pose maskotnya sendiri (hasil potong sprite sheet
+// maskot.png). Urutan & teksnya mengikuti kartu di sheet tersebut, jadi pose dan label
+// selalu nyambung — bukan satu gambar statis yang diulang untuk semua keadaan.
+const MASCOT_STATES = [
+  { pose: 1, label: 'Sedang berpikir...' },
+  { pose: 2, label: 'Memahami permintaan...' },
+  { pose: 3, label: 'Menganalisis informasi...' },
+  { pose: 4, label: 'Mencari solusi terbaik...' },
+  { pose: 5, label: 'Menyusun jawaban...' },
+  { pose: 6, label: 'Mengolah informasi...' },
+  { pose: 7, label: 'Memeriksa kembali...' },
+  { pose: 8, label: 'Menyempurnakan jawaban...' },
+  { pose: 10, label: 'Menyiapkan jawaban...' },
+  { pose: 11, label: 'Sedang memproses...' },
+  { pose: 9, label: 'Hampir selesai...' }
 ];
+
+// Pose khusus untuk keadaan yang sudah pasti (tidak ikut rotasi).
+const POSE_WRITING_CODE = 6;   // maskot dengan laptop
+const POSE_RUNNING_CMD = 8;    // maskot memegang gear
+const POSE_SUMMARY = 10;       // maskot dengan pesawat kertas
+const POSE_DONE = 12;          // maskot dengan centang hijau
+
+const THINKING_MESSAGES = MASCOT_STATES.map(s => s.label);
 
 let thinkingInterval = null;
 let currentThinkingIndex = 0;
 
+// Ganti pose + label pada elemen "sedang bekerja" milik satu bubble. `src` di-set ulang
+// pada elemen <img> yang SAMA (bukan bikin elemen baru), jadi animasi CSS-nya tidak
+// restart dan maskot tetap terlihat bergerak.
+function applyMascotState(workingElem, pose, label) {
+  if (!workingElem) return;
+  const img = workingElem.querySelector('.sendago-mascot');
+  const text = workingElem.querySelector('.claude-loader-text');
+  if (img && pose) img.src = mascotSrc(pose);
+  if (text && label) text.textContent = label;
+}
+
 function startThinkingProgress(loaderTextElem) {
   stopThinkingProgress();
   currentThinkingIndex = 0;
-  if (loaderTextElem) {
-    loaderTextElem.textContent = THINKING_MESSAGES[0];
-  }
+  const workingElem = loaderTextElem?.closest('.message-working, .claude-loader');
+  applyMascotState(workingElem, MASCOT_STATES[0].pose, MASCOT_STATES[0].label);
+
   thinkingInterval = setInterval(() => {
+    // Berhenti di state terakhir, jangan memutar balik ke awal — supaya tidak terkesan
+    // proses mengulang dari nol padahal sebenarnya masih maju.
+    if (currentThinkingIndex >= MASCOT_STATES.length - 1) return;
     currentThinkingIndex++;
-    if (currentThinkingIndex < THINKING_MESSAGES.length) {
-      const activeLoader = document.querySelector('.claude-loader-text');
-      if (activeLoader) {
-        activeLoader.style.opacity = '0';
-        setTimeout(() => {
-          activeLoader.textContent = THINKING_MESSAGES[currentThinkingIndex];
-          activeLoader.style.opacity = '1';
-        }, 180);
-      }
-    } else {
-      const activeLoader = document.querySelector('.claude-loader-text');
-      if (activeLoader) {
-        activeLoader.textContent = THINKING_MESSAGES[THINKING_MESSAGES.length - 1];
-      }
-    }
+    const state = MASCOT_STATES[currentThinkingIndex];
+    const text = workingElem?.querySelector('.claude-loader-text');
+    if (!text) return;
+    text.style.opacity = '0';
+    setTimeout(() => {
+      applyMascotState(workingElem, state.pose, state.label);
+      text.style.opacity = '1';
+    }, 180);
   }, 1800);
 }
 
@@ -1237,30 +1301,44 @@ function createAssistantMessage() {
   msg.className = 'message assistant';
   const content = document.createElement('div');
   content.className = 'message-content';
+
+  // Indikator "sedang bekerja" sengaja jadi elemen TERPISAH & PERMANEN, bukan bagian dari
+  // contentElem. contentElem ditulis ulang setiap chunk masuk (bisa puluhan kali per detik);
+  // kalau maskot ikut di dalamnya, elemen <img>-nya dibuat ulang terus dan animasinya
+  // restart dari frame nol setiap kali — hasilnya maskot justru terlihat beku, kebalikan
+  // dari yang diinginkan.
+  const working = document.createElement('div');
+  working.className = 'message-working';
+  working.innerHTML = mascotLoaderHtml(THINKING_MESSAGES[0]);
+
   msg.appendChild(content);
+  msg.appendChild(working);
   messagesContainer.appendChild(msg);
   autoScrollIfNearBottom();
 
-  const bubble = { elem: msg, contentElem: content, rawText: '', loaderTextElem: null };
-  resetBubbleToLoading(bubble);
+  const bubble = {
+    elem: msg,
+    contentElem: content,
+    workingElem: working,
+    rawText: '',
+    loaderTextElem: working.querySelector('.claude-loader-text')
+  };
+  startThinkingProgress(bubble.loaderTextElem);
   return bubble;
 }
 
-// Kembalikan sebuah bubble (baru atau yang sudah mulai ter-isi teks) ke tampilan loading
-// awal — dipakai saat model pertama drop di tengah stream dan sistem otomatis mencoba
-// model fallback berikutnya, supaya teks parsial dari model yang gagal tidak tercampur
-// dengan jawaban model berikutnya di bubble yang sama.
+// Kembalikan sebuah bubble ke tampilan loading awal — dipakai saat model pertama drop di
+// tengah stream dan sistem otomatis mencoba model fallback berikutnya, supaya teks parsial
+// dari model yang gagal tidak tercampur dengan jawaban model berikutnya di bubble yang sama.
+// Elemen maskot TIDAK dibuat ulang di sini, cuma teksnya yang direset — animasinya jalan terus.
 function resetBubbleToLoading(bubble) {
   bubble.rawText = '';
-  bubble.contentElem.innerHTML = `
-    <div class="claude-loader">
-      <div class="claude-shimmer-dot"></div>
-      <span class="claude-loader-text">${THINKING_MESSAGES[0]}</span>
-    </div>
-  `;
-  bubble.loaderTextElem = bubble.contentElem.querySelector('.claude-loader-text');
+  bubble.contentElem.innerHTML = '';
+  if (bubble.workingElem) bubble.workingElem.style.display = '';
+  if (bubble.loaderTextElem) bubble.loaderTextElem.textContent = THINKING_MESSAGES[0];
   startThinkingProgress(bubble.loaderTextElem);
 }
+
 
 function appendAssistantDirectMessage(markdownText) {
   const emptyState = document.getElementById('claude-empty-state');
@@ -1335,12 +1413,6 @@ function attachCodeBlockActions(container) {
 function renderCleanChat(raw, isDone) {
   if (!raw) return '';
   let text = raw;
-
-  let writingFileName = null;
-  const writingMatch = /<sendago_edit\s+file="([^"]+)"(?:\s+desc="([^"]*)")?>/i.exec(text);
-  if (writingMatch && !isDone) {
-    writingFileName = writingMatch[1];
-  }
 
   text = text.replace(/<sendago_edit\s+file="([^"]+)"(?:\s+desc="([^"]*)")?>[\s\S]*?(?:<\/sendago_edit>|$)/gi, '');
   text = text.replace(/<sendago_image\s+[^>]*>[\s\S]*?(?:<\/sendago_image>|$)/gi, '');
@@ -1418,26 +1490,17 @@ function renderCleanChat(raw, isDone) {
     html = html.replace(`__CODE_BLOCK_${idx}__`, blockHtml);
   });
 
-  if (!isDone) {
-    if (writingFileName) {
-      const shortName = getShortPath(writingFileName);
-      html += `
-        <div class="claude-writing-pulse">
-          <span>✍️ Sedang menyusun: <strong>${escapeHtml(shortName)}</strong>...</span>
-          <div class="shimmer-bar"></div>
-        </div>
-      `;
-    } else if (!html) {
-      html = `
-        <div class="claude-loader">
-          <div class="claude-shimmer-dot"></div>
-          <span class="claude-loader-text">${escapeHtml(getActiveThinkingMessage())}</span>
-        </div>
-      `;
-    }
-  }
-
+  // Indikator "sedang bekerja" TIDAK lagi dirender di sini — sekarang dipegang elemen
+  // permanen `.message-working` di luar contentElem (lihat createAssistantMessage), supaya
+  // animasi maskotnya tidak restart setiap chunk masuk. Label statusnya diperbarui lewat
+  // applyMascotState() dari handler 'chunk'.
   return html;
+}
+
+/** Nama file yang sedang ditulis model, kalau tag <sendago_edit> sudah mulai mengalir. */
+function detectWritingFileName(raw) {
+  const match = /<sendago_edit\s+file="([^"]+)"/i.exec(raw || '');
+  return match ? match[1] : null;
 }
 
 function stripAnsi(str) {
@@ -1456,7 +1519,7 @@ function renderTerminalBlockStart(termId, command, desc) {
         <code>$ ${escapeHtml(command)}</code>
       </div>
       <div class="terminal-header-right">
-        <span class="terminal-status-badge running">Menjalankan...</span>
+        <span class="terminal-status-badge running">${mascotHtml('mascot-xs', POSE_RUNNING_CMD)} Menjalankan...</span>
         <span class="terminal-chevron">▼</span>
       </div>
     </div>
@@ -1519,6 +1582,9 @@ function finalizeCurrentBubble() {
   if (!currentAssistantBubble) return;
   const html = renderCleanChat(currentAssistantBubble.rawText, true);
 
+  // Giliran ini sudah selesai — maskot berhenti bekerja.
+  currentAssistantBubble.workingElem?.remove();
+
   if (!html || !html.trim()) {
     // Giliran ini tidak menghasilkan teks sama sekali (umum untuk native tool-calling murni
     // — model cuma memanggil tool tanpa narasi). Buang bubble loading kosong ini dari DOM
@@ -1556,7 +1622,7 @@ function handleStartFinalSummary() {
 
   const badge = document.createElement('div');
   badge.className = 'claude-loop-badge';
-  badge.innerHTML = `<span>📝</span> <span><strong>Menyusun kesimpulan...</strong></span>`;
+  badge.innerHTML = `${mascotHtml('mascot-sm', POSE_SUMMARY)} <span><strong>Menyusun kesimpulan...</strong></span>`;
   appendTimelineNode(badge, 'running');
 
   currentAssistantBubble = createAssistantMessage();
@@ -1566,7 +1632,9 @@ function handleStartFinalSummary() {
 function handleTaskCompleted(summary) {
   const doneElem = document.createElement('div');
   doneElem.className = 'claude-done-badge';
-  doneElem.innerHTML = `<span>✔</span> <span>${escapeHtml(summary || 'Tugas selesai dan diverifikasi otonom.')}</span>`;
+  // Pose "Selesai!" (maskot dengan centang hijau) — statis, bukan indikator kerja,
+  // jadi animasinya dimatikan lewat class mascot-static.
+  doneElem.innerHTML = `${mascotHtml('mascot-sm mascot-static', POSE_DONE)} <span>${escapeHtml(summary || 'Tugas selesai dan diverifikasi otonom.')}</span>`;
   appendTimelineNode(doneElem, 'success');
   autoScrollIfNearBottom();
 }

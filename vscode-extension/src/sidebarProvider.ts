@@ -1674,6 +1674,7 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'style.css'));
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'main.js'));
     const logoUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'sendagoai.png'));
+    const mascotDirUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'mascot'));
     const nonce = this._getNonce();
 
     return `<!DOCTYPE html>
@@ -1685,7 +1686,11 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
   <link rel="stylesheet" href="${styleUri}">
   <title>SendaGo AI</title>
 </head>
-<body>
+<!-- data-mascot-dir: URI folder pose maskot diteruskan ke main.js supaya indikator
+     "sedang bekerja" bisa memakai maskot SendaGo (ganti pose sesuai tahapan), bukan titik
+     abu-abu yang terlihat diam. Webview tidak bisa memuat file lokal langsung, jadi URI-nya
+     harus lewat asWebviewUri() di sini. -->
+<body data-mascot-dir="${mascotDirUri}">
   <!-- Clean SendaGo AI Header (Claude Minimalist Style) -->
   <header class="claude-header">
     <div class="hdr-action-left">

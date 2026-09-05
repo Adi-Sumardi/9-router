@@ -5,6 +5,32 @@ Versi sebelum 0.6.0 tidak memiliki catatan detail — lihat riwayat `.vsix` sebe
 sebagai referensi kasar (fitur Auto-Edit, Plan Mode, dan Model Routing Pool diperkenalkan
 bertahap dari 0.1.0 sampai 0.5.0).
 
+## 0.13.0 — Animated SendaGo Mascot as the "Working" Indicator
+
+The grey shimmer dot made the UI look frozen while code was being written or a command was
+running. The mascot artwork the user supplied (`maskot.png`) is a 4×3 sprite sheet of 12
+poses whose captions already matched the rotating loading messages.
+
+### Added
+- Sliced the sprite sheet into 12 individual poses (`media/mascot/mascot-01..12.png`, 128px,
+  ~25 KB each) by detecting each pose's own bounding box and pasting it onto a transparent
+  square canvas — cropping to a fixed grid pulled neighbouring caption text into several
+  frames, since a square centred on a wide pose overflows its row band.
+- The mascot is now the working indicator everywhere there's a wait: composing an answer
+  (poses rotate through the 11 working states in step with the label), writing a file
+  (locks to the laptop pose with the filename), running a command (gear pose in the
+  terminal badge), drafting the summary (paper-plane pose), and task completion (the
+  green-check pose, static).
+- `prefers-reduced-motion` stops the bobbing animation but keeps the mascot visible.
+
+### Changed
+- The working indicator moved out of `.message-content` into a separate persistent
+  `.message-working` element. `message-content` is rewritten on every streamed chunk — with
+  the mascot inside it, the `<img>` was recreated dozens of times per second and its CSS
+  animation restarted from frame zero each time, so the mascot appeared frozen: the exact
+  opposite of the point. Pose changes now swap `src` on the same element, leaving the
+  animation running.
+
 ## 0.12.1 — Auto-Follow the Latest Message Again (Without Losing the Prompt Anchor)
 
 The 0.11.1 prompt-anchor fix disabled auto-scroll for the entire turn to protect the
