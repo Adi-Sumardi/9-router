@@ -5,6 +5,24 @@ Versi sebelum 0.6.0 tidak memiliki catatan detail — lihat riwayat `.vsix` sebe
 sebagai referensi kasar (fitur Auto-Edit, Plan Mode, dan Model Routing Pool diperkenalkan
 bertahap dari 0.1.0 sampai 0.5.0).
 
+## 0.13.2 — Fix: Cheap Model Could Declare the Whole Task Finished Halfway Through
+
+Reported: work consistently stopped mid-execution and jumped straight to a summary.
+
+### Fixed
+- The anti-degradation guard only watched for write/exec actions, so `task_done` slipped
+  through. A cheap model will happily decide it's "done" after a single look at some grep
+  output — and `task_done` ends the loop immediately and renders the completion summary, so
+  the task stopped halfway with a conclusion attached. `task_done` from the light model is
+  now discarded and the step re-run on the primary model, which decides whether the work is
+  genuinely finished.
+- The guard also fires when the light model returns **no actionable step at all** (just
+  prose). Previously that ended the turn via the "nothing executed" exit, which was another
+  way for work to stop early.
+- Added an efficiency backstop: if the light model overreaches twice in one turn, rotation
+  is switched off for the rest of that turn. Without it, every light step could cost two
+  calls (light attempt + primary redo) and the token saver would become a net loss.
+
 ## 0.13.1 — Fix: Token Saver Left the Agent Stuck in Exploration, Never Writing Code
 
 Regression from 0.12.0 reported by the user: after entering a prompt, code was no longer

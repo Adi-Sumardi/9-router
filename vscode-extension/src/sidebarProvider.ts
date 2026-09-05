@@ -532,6 +532,24 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
       || parsed.images.length > 0;
   }
 
+  /** True kalau langkah ini menghasilkan aksi apa pun — termasuk sekadar membaca. */
+  private hasAnyAction(parsed: {
+    edits: FileEditAction[];
+    replaces: FileReplaceAction[];
+    commands: CommandAction[];
+    images: ImageAction[];
+    greps: GrepAction[];
+    finds: FindFilesAction[];
+    reads: ReadFileAction[];
+    done: unknown;
+  }): boolean {
+    return this.hasWriteOrExecAction(parsed)
+      || parsed.greps.length > 0
+      || parsed.finds.length > 0
+      || parsed.reads.length > 0
+      || !!parsed.done;
+  }
+
   /**
    * Fingerprint dari SEMUA aksi yang diminta model pada satu turn — dipakai untuk
    * mendeteksi stagnasi (model mengulang tool call PERSIS SAMA berkali-kali tanpa
@@ -704,6 +722,9 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
     let lightModelNoticeShown = false;
     let consecutiveLightSteps = 0;
     const MAX_CONSECUTIVE_LIGHT_STEPS = 2;
+    let lightOverreachCount = 0;
+    let lightRotationDisabled = false;
+    const MAX_LIGHT_OVERREACH = 2;
 
     // Permission mode: .sendago/settings.json milik REPO (bisa di-commit, berlaku untuk
     // semua kontributor) menang atas setting personal `sendago.autoExecute` di VS Code —
@@ -768,7 +789,12 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
         // manual di sini) supaya tidak tercampur dengan chunk dari attempt yang gagal.
         // Rotasi model: langkah yang cuma perlu mencerna hasil pencarian dipindah ke
         // lightChain (model termurah), langkah berat tetap di model utama pool.
-        const useLightModel = nextStepIsLight && modelPlan.lightChain.length > 0;
+        // `lightRotationDisabled`: kalau model ringan berkali-kali mengambil keputusan yang
+        // harus diulang model utama, rotasinya justru merugikan (satu langkah jadi dua
+        // panggilan). Setelah beberapa kali, hentikan rotasi untuk sisa giliran ini.
+        const useLightModel = nextStepIsLight
+          && !lightRotationDisabled
+          && modelPlan.lightChain.length > 0;
 
         if (useLightModel && !lightModelNoticeShown) {
           lightModelNoticeShown = true;
@@ -798,15 +824,27 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
         let attempt = await runStepAttempt(useLightModel);
         let parsed = this.parseActionsFromResponse(attempt.toolCalls, attempt.text);
 
-        // PENGAMAN ANTI-TURUN-KUALITAS: begitu model ringan menyatakan langkah ini perlu
-        // menulis/menjalankan sesuatu, hasilnya dibuang dan langkah yang sama diulang
-        // memakai model utama — jadi yang menulis kode selalu model terbaik, sementara
-        // langkah eksplorasi yang jumlahnya jauh lebih banyak tetap murah.
-        if (useLightModel && this.hasWriteOrExecAction(parsed)) {
+        // PENGAMAN ANTI-TURUN-KUALITAS: model ringan hanya boleh mengerjakan langkah
+        // eksplorasi. Tiga keputusan berikut dikembalikan ke model utama:
+        //  1. Menulis/menjalankan sesuatu — kualitas kode tidak boleh turun.
+        //  2. Menyatakan SELURUH task selesai (task_done). Ini penyebab bug yang dilaporkan:
+        //     model murah gampang merasa "sudah beres" setelah sekali membaca hasil grep,
+        //     dan karena task_done langsung menghentikan loop + menampilkan kesimpulan,
+        //     pekerjaan berhenti di tengah jalan padahal belum selesai.
+        //  3. Tidak menghasilkan aksi apa pun (cuma teks) — kalau dibiarkan, loop berhenti
+        //     karena tidak ada yang dieksekusi, jadi giliran ini pun harus diulang.
+        const lightAttemptOverreached = useLightModel && (
+          this.hasWriteOrExecAction(parsed) || !!parsed.done || !this.hasAnyAction(parsed)
+        );
+
+        if (lightAttemptOverreached) {
+          lightOverreachCount++;
+          if (lightOverreachCount >= MAX_LIGHT_OVERREACH) lightRotationDisabled = true;
+
           this._view?.webview.postMessage({ type: 'resetCurrentBubble' });
           this._view?.webview.postMessage({
             type: 'assistantMessage',
-            text: '↩️ Langkah ini perlu menulis/menjalankan sesuatu — dikembalikan ke model utama agar kualitas kode tetap terjaga.'
+            text: '↩️ Langkah ini butuh keputusan model utama — dikembalikan agar kualitas & kelengkapan pekerjaan tetap terjaga.'
           });
           attempt = await runStepAttempt(false);
           parsed = this.parseActionsFromResponse(attempt.toolCalls, attempt.text);
