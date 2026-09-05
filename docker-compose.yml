@@ -1,0 +1,23 @@
+services:
+  9router:
+    image: decolua/9router:latest
+    container_name: 9router
+    restart: unless-stopped
+    # Bind to localhost (127.0.0.1) for local lab security to prevent exposing to local network / Wi-Fi
+    ports:
+      - "127.0.0.1:20128:20128"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - DATA_DIR=/app/data
+      - NODE_ENV=production
+      - PORT=20128
+      - INITIAL_PASSWORD=${INITIAL_PASSWORD:-admin123456}
+      # Optional: set an administrative secret or custom config if supported by your version
+      # - ADMIN_KEY=${ADMIN_KEY:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:20128/v1/models || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

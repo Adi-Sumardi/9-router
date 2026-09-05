@@ -1,0 +1,9 @@
+.vscode/**
+src/**
+test/**
+.test-dist/**
+tsconfig.json
+eslint.config.js
+package-lock.json
+**/*.vsix
+**/.gitignore

@@ -1,0 +1,13 @@
+{
+  "name": "9router-lab",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "9Router local AI gateway integration and lab environment",
+  "scripts": {
+    "chat": "node chat.js",
+    "test:gateway": "./test_gateway.sh"
+  },
+  "keywords": ["9router", "ai-gateway", "llm-proxy"],
+  "author": "",
+  "license": "MIT"
+}

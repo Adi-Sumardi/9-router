@@ -1,0 +1,64 @@
+services:
+  gateway:
+    image: ghcr.io/decolua/9router:latest
+    container_name: sendago-gateway
+    restart: always
+    environment:
+      - PORT=20128
+      - INITIAL_PASSWORD=${INITIAL_PASSWORD:?Set INITIAL_PASSWORD in .env to a strong password before deploying}
+      - DATABASE_URL=${DATABASE_URL:-}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+    volumes:
+      - ./data:/app/data
+    networks:
+      - internal-net
+    depends_on:
+      - postgres
+      - redis
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: sendago-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy_data:/data
+      - ./caddy_config:/config
+    networks:
+      - internal-net
+    depends_on:
+      - gateway
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: sendago-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sendago_gateway}
+      POSTGRES_USER: ${POSTGRES_USER:-sendago_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env to a strong password before deploying}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - internal-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: sendago-redis
+    restart: always
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env to a strong password before deploying}
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal-net
+
+networks:
+  internal-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:

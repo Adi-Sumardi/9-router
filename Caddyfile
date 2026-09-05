@@ -1,0 +1,30 @@
+# Caddy Configuration for SendaGo AI Gateway
+# Ganti {$DOMAIN:ai.sendago.id} dengan domain VPS Anda di file .env (contoh: DOMAIN=ai.sendago.id)
+
+{$DOMAIN:localhost} {
+    # Logging
+    log {
+        output stdout
+        format json
+    }
+
+    # Security Headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    # Proxy to SendaGo Gateway container
+    reverse_proxy gateway:20128 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+
+        # Keepalive & Buffer settings for streaming SSE
+        flush_interval -1
+    }
+}

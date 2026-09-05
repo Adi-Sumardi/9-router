@@ -1,0 +1,210 @@
+{
+  "name": "sendago-ai-assistant",
+  "displayName": "SendaGo AI — 9Router Assistant (Claude Code & Antigravity Edition)",
+  "description": "Autonomous Claude Code & Cline Style AI Coding Assistant: Surgical Replace, Grep & Glob Search, Persistent Shell, and Multi-Model Fusion powered by 9Router",
+  "version": "0.8.1",
+  "private": true,
+  "license": "UNLICENSED",
+  "publisher": "sendago",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets",
+    "Machine Learning",
+    "Education",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "coding",
+    "copilot",
+    "claude",
+    "gemini",
+    "deepseek",
+    "9router",
+    "sendago",
+    "agent",
+    "auto-edit"
+  ],
+  "icon": "media/sendagoai.png",
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "sendago-sidebar",
+          "title": "SendaGo AI",
+          "icon": "media/sendagoai.png"
+        }
+      ]
+    },
+    "views": {
+      "sendago-sidebar": [
+        {
+          "type": "webview",
+          "id": "sendago.sidebarView",
+          "name": "SendaGo AI Agent",
+          "icon": "media/sendagoai.png"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "sendago.claudeCodeMode",
+        "title": "SendaGo: Start Claude Code Autonomous Mode",
+        "category": "SendaGo AI"
+      },
+      {
+        "command": "sendago.openChat",
+        "title": "SendaGo: Open AI Assistant",
+        "category": "SendaGo AI"
+      },
+      {
+        "command": "sendago.planMode",
+        "title": "SendaGo: Start Plan Mode",
+        "category": "SendaGo AI"
+      },
+      {
+        "command": "sendago.autoEditFile",
+        "title": "SendaGo: Auto-Edit Active File",
+        "category": "SendaGo AI"
+      },
+      {
+        "command": "sendago.explainCode",
+        "title": "SendaGo: Explain Selected Code",
+        "category": "SendaGo AI"
+      },
+      {
+        "command": "sendago.fixBug",
+        "title": "SendaGo: Find & Fix Bugs in Selection",
+        "category": "SendaGo AI"
+      },
+      {
+        "command": "sendago.generateTests",
+        "title": "SendaGo: Generate Unit Tests",
+        "category": "SendaGo AI"
+      },
+      {
+        "command": "sendago.optimizeCode",
+        "title": "SendaGo: Optimize & Refactor Code",
+        "category": "SendaGo AI"
+      },
+      {
+        "command": "sendago.generateDocs",
+        "title": "SendaGo: Generate Documentation / Comments",
+        "category": "SendaGo AI"
+      },
+      {
+        "command": "sendago.switchModelPool",
+        "title": "SendaGo: Switch Model Pool (Free / Pro / Hybrid)",
+        "category": "SendaGo AI"
+      },
+      {
+        "command": "sendago.checkGatewayStatus",
+        "title": "SendaGo: Test 9Router Connection",
+        "category": "SendaGo AI"
+      },
+      {
+        "command": "sendago.setupApiKey",
+        "title": "SendaGo: Set API Key",
+        "category": "SendaGo AI"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "submenu": "sendago.editorSubmenu",
+          "group": "1_modification"
+        }
+      ],
+      "sendago.editorSubmenu": [
+        {
+          "command": "sendago.explainCode",
+          "group": "1_actions@1"
+        },
+        {
+          "command": "sendago.fixBug",
+          "group": "1_actions@2"
+        },
+        {
+          "command": "sendago.optimizeCode",
+          "group": "1_actions@3"
+        },
+        {
+          "command": "sendago.generateTests",
+          "group": "2_testing@1"
+        },
+        {
+          "command": "sendago.generateDocs",
+          "group": "2_testing@2"
+        }
+      ]
+    },
+    "submenus": [
+      {
+        "id": "sendago.editorSubmenu",
+        "label": "✨ SendaGo AI"
+      }
+    ],
+    "configuration": {
+      "title": "SendaGo AI Assistant",
+      "properties": {
+        "sendago.gatewayUrl": {
+          "type": "string",
+          "default": "http://localhost:20128/v1",
+          "description": "9Router local API Gateway Base URL"
+        },
+        "sendago.defaultModel": {
+          "type": "string",
+          "default": "claude-sonnet-5-fusion",
+          "description": "Default active model ID"
+        },
+        "sendago.modelPool": {
+          "type": "string",
+          "default": "claude-sonnet-5-fusion",
+          "description": "Default routing: 'claude-sonnet-5-fusion' (Free Multi-Model Fusion), 'hybrid', 'free', 'pro', or a specific model ID discovered from the gateway"
+        },
+        "sendago.autoExecute": {
+          "type": "boolean",
+          "default": true,
+          "description": "Claude Code Mode: Automatically execute safe terminal commands and apply proposed file edits with live feedback loop"
+        },
+        "sendago.maxAutonomousSteps": {
+          "type": "number",
+          "default": 8,
+          "description": "Maximum autonomous agent iteration steps per request"
+        },
+        "sendago.temperature": {
+          "type": "number",
+          "default": 0.2,
+          "description": "Sampling temperature for code generation (0.0 to 1.0)"
+        }
+      }
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.20.0",
+    "eslint": "^10.10.0",
+    "typescript": "^5.3.3",
+    "typescript-eslint": "^8.69.0"
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run bundle",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "bundle": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
+    "bundle:dev": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
+    "package": "npm run bundle && vsce package --no-dependencies",
+    "pretest": "esbuild ./test/*.test.ts --bundle --outdir=.test-dist --external:vscode --format=cjs --platform=node",
+    "test": "node --test .test-dist/*.test.js",
+    "lint": "eslint src test"
+  }
+}

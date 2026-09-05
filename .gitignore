@@ -1,0 +1,15 @@
+# Environment variables & secrets
+.env
+.env.local
+
+# Persistent SQLite database & backups
+data/
+data/db/
+backups/
+
+# Node & OS
+node_modules/
+.DS_Store
+*.vsix
+dist/
+.test-dist/
