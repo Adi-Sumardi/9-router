@@ -5,6 +5,24 @@ Versi sebelum 0.6.0 tidak memiliki catatan detail — lihat riwayat `.vsix` sebe
 sebagai referensi kasar (fitur Auto-Edit, Plan Mode, dan Model Routing Pool diperkenalkan
 bertahap dari 0.1.0 sampai 0.5.0).
 
+## 0.12.1 — Auto-Follow the Latest Message Again (Without Losing the Prompt Anchor)
+
+The 0.11.1 prompt-anchor fix disabled auto-scroll for the entire turn to protect the
+anchor, which meant the user had to scroll manually to watch a response come in.
+
+### Fixed
+- Replaced the blanket "no auto-scroll during a turn" lock with a `followBottom` flag kept
+  in sync with the real scroll position via a `scroll` listener on the message list. The
+  view now follows new content automatically, stops following the moment the user scrolls
+  up to read something, and resumes as soon as they return to the bottom. Sending a new
+  prompt always re-enables following.
+- The two behaviours coexist rather than conflict: the new prompt is still anchored near
+  the top on send, and because the bottom spacer sizes the area below it to roughly one
+  viewport, following the bottom keeps the prompt at the top until the answer actually
+  grows past a screenful — then it scrolls away naturally, as it should.
+- Programmatic scrolls are timestamp-guarded so the listener doesn't mistake our own
+  smooth anchor animation for the user scrolling away and switch following off.
+
 ## 0.12.0 — Token Saver: Models Take Turns Instead of One Doing Everything
 
 Previously a 20-step autonomous task called the pool's primary model 20 times, including

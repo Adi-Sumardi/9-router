@@ -159,6 +159,9 @@ function updateBottomSpacer() {
 }
 
 function scrollAnchorToTop(elem) {
+  // Beri jeda lebih panjang: animasi smooth melewati banyak posisi antara, dan tanpa ini
+  // listener scroll akan mengira user sedang menggulir manual lalu mematikan auto-follow.
+  programmaticScrollUntil = Date.now() + 700;
   messagesContainer.scrollTo({
     top: Math.max(0, offsetWithinMessages(elem) - 8),
     behavior: 'smooth'
@@ -173,32 +176,43 @@ function scrollAnchorToTop(elem) {
 // "near bottom" (baru saja ditambahi 2 elemen) sehingga auto-scroll menang duluan dan
 // balik memaksa ke bawah — persis gejala yang dilaporkan: makin panjang percakapan, makin
 // besar peluang chunk pertama menang balapan sebelum anchor sempat jalan.
-let scrollAnchorLocked = false;
+// Ikut turun mengikuti konten terbaru selama user TIDAK sedang menggulir ke atas untuk
+// membaca sesuatu. Versi sebelumnya mematikan auto-scroll total selama satu giliran demi
+// menjaga anchor prompt — akibatnya user harus scroll manual terus-menerus untuk melihat
+// jawaban yang sedang mengalir. Sekarang keduanya jalan bersama: prompt di-anchor ke atas
+// saat dikirim, lalu tampilan ikut turun sendiri seiring jawaban tumbuh.
+let followBottom = true;
+// Scroll yang kita picu sendiri tidak boleh dianggap "user menggulir manual".
+let programmaticScrollUntil = 0;
+
+// Sinkronkan followBottom dari posisi scroll yang sebenarnya: begitu user menggulir ke
+// atas, auto-scroll berhenti sendiri; begitu dia kembali ke dasar, menyala lagi.
+messagesContainer?.addEventListener('scroll', () => {
+  if (Date.now() < programmaticScrollUntil) return;
+  followBottom = isViewportNearBottom();
+});
+
+function scrollMessagesToBottom() {
+  programmaticScrollUntil = Date.now() + 150;
+  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+}
 
 // Dipanggil setiap kali ada konten baru masuk (chunk/toast/terminal block/bubble) —
 // selalu perbarui spacer dulu supaya ruang scroll menyusut seiring jawaban tumbuh.
 function autoScrollIfNearBottom() {
   updateBottomSpacer();
-  if (scrollAnchorLocked) return;
-  if (isViewportNearBottom()) {
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
-  }
+  if (!followBottom) return;
+  scrollMessagesToBottom();
 }
 
 // Pasang anchor ke pesan yang baru dikirim, siapkan ruang scroll-nya, lalu naikkan ke atas
 // viewport. Dijalankan di frame berikutnya supaya tinggi elemen sudah final saat dihitung.
-// Caller WAJIB sudah set `scrollAnchorLocked = true` SEBELUM elemen apa pun di-append,
-// karena appendUserMessage()/createAssistantMessage() punya auto-scroll masing-masing.
 function scheduleAnchorScrollTo(targetElem) {
   anchoredMsgElem = targetElem;
   requestAnimationFrame(() => {
     updateBottomSpacer();
     scrollAnchorToTop(targetElem);
   });
-}
-
-function unlockScrollAnchor() {
-  scrollAnchorLocked = false;
 }
 
 // Send/Stop State Toggle
@@ -617,13 +631,12 @@ function sendMessage() {
   const text = promptInput.value.trim();
   if (!text && currentAttachments.length === 0) return;
 
-  // Kunci PALING AWAL, sebelum elemen apa pun ditambahkan ke DOM. appendUserMessage() dan
-  // createAssistantMessage() di bawah masing-masing punya auto-scroll sendiri (autoScrollIfNearBottom)
-  // — kalau lock baru dipasang SETELAH keduanya dipanggil, mereka sempat lompat ke bawah
-  // duluan sebelum lock aktif (ini persis bug yang lolos di percobaan sebelumnya: lock
-  // dipasang lewat lockScrollAnchor() di akhir, padahal appendUserMessage/createAssistantMessage
-  // sudah lebih dulu memanggil auto-scroll masing-masing).
-  scrollAnchorLocked = true;
+  // Kirim prompt baru = user pasti ingin mengikuti jawabannya, jadi nyalakan lagi
+  // auto-follow meski sebelumnya dia sempat menggulir ke atas untuk membaca chat lama.
+  followBottom = true;
+  // Lepas anchor giliran sebelumnya dulu — kalau tidak, spacer sempat dihitung terhadap
+  // pesan lama saat dua fungsi append di bawah dipanggil.
+  anchoredMsgElem = null;
 
   // Hide Claude empty state
   const emptyState = document.getElementById('claude-empty-state');
@@ -863,7 +876,6 @@ window.addEventListener('message', (event) => {
       finalizeCurrentBubble();
       currentAssistantBubble = null;
       setGeneratingState(false);
-      unlockScrollAnchor();
       break;
 
     case 'stopped':
@@ -876,7 +888,6 @@ window.addEventListener('message', (event) => {
       }
       currentAssistantBubble = null;
       setGeneratingState(false);
-      unlockScrollAnchor();
       break;
 
     case 'error':
@@ -889,7 +900,6 @@ window.addEventListener('message', (event) => {
       }
       currentAssistantBubble = null;
       setGeneratingState(false);
-      unlockScrollAnchor();
       break;
   }
 });
