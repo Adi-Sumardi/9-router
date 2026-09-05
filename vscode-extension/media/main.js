@@ -109,10 +109,32 @@ function isViewportNearBottom() {
   return messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight < threshold;
 }
 
+// "Kunci" anchor aktif selama satu turn — dipasang oleh sendMessage() ke elemen prompt yang
+// baru dikirim. Selama terkunci, autoScrollIfNearBottom() TIDAK boleh ikut lompat ke bawah
+// sama sekali, apa pun status "near bottom"-nya. Tanpa kunci ini ada race condition nyata:
+// chunk pertama dari respons bisa datang SEBELUM requestAnimationFrame di sendMessage()
+// sempat menjalankan scrollIntoView, dan begitu itu terjadi, container memang masih
+// "near bottom" (baru saja ditambahi 2 elemen) sehingga auto-scroll menang duluan dan
+// balik memaksa ke bawah — persis gejala yang dilaporkan: makin panjang percakapan, makin
+// besar peluang chunk pertama menang balapan sebelum anchor sempat jalan.
+let scrollAnchorLocked = false;
+
 function autoScrollIfNearBottom() {
+  if (scrollAnchorLocked) return;
   if (isViewportNearBottom()) {
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
   }
+}
+
+function lockScrollAnchor(targetElem) {
+  scrollAnchorLocked = true;
+  requestAnimationFrame(() => {
+    targetElem.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  });
+}
+
+function unlockScrollAnchor() {
+  scrollAnchorLocked = false;
 }
 
 // Send/Stop State Toggle
@@ -530,6 +552,11 @@ function sendMessage() {
   const text = promptInput.value.trim();
   if (!text && currentAttachments.length === 0) return;
 
+  // Jaga-jaga: lepas lock anchor turn sebelumnya kalau karena suatu hal belum sempat
+  // ke-unlock (mis. 'done'/'stopped'/'error' tidak pernah sampai) — supaya auto-scroll
+  // tidak permanen macet untuk sisa sesi.
+  unlockScrollAnchor();
+
   // Hide Claude empty state
   const emptyState = document.getElementById('claude-empty-state');
   if (emptyState) emptyState.style.display = 'none';
@@ -552,14 +579,9 @@ function sendMessage() {
   currentAssistantBubble = createAssistantMessage();
   setGeneratingState(true);
 
-  // BUG FIX: prompt yang baru dikirim harus tetap terlihat di ATAS viewport selagi
-  // jawabannya mengalir mengisi ke bawah (kayak ChatGPT/Claude.ai) — sebelumnya
-  // createAssistantMessage() di atas langsung scroll ke paling BAWAH, jadi prompt yang
-  // baru saja dikirim langsung tergusur ke luar layar begitu ada konten baru sedikit saja.
-  // Jalankan setelah render berikutnya supaya tinggi elemen sudah pasti final.
-  requestAnimationFrame(() => {
-    userMsgElem.scrollIntoView({ block: 'start', behavior: 'smooth' });
-  });
+  // Kunci anchor ke prompt yang baru dikirim (lihat lockScrollAnchor) supaya tidak kalah
+  // balapan lawan auto-scroll dari chunk pertama yang bisa saja sudah masuk lebih dulu.
+  lockScrollAnchor(userMsgElem);
 
   vscode.postMessage({
     type: 'prompt',
@@ -766,6 +788,7 @@ window.addEventListener('message', (event) => {
       finalizeCurrentBubble();
       currentAssistantBubble = null;
       setGeneratingState(false);
+      unlockScrollAnchor();
       break;
 
     case 'stopped':
@@ -778,6 +801,7 @@ window.addEventListener('message', (event) => {
       }
       currentAssistantBubble = null;
       setGeneratingState(false);
+      unlockScrollAnchor();
       break;
 
     case 'error':
@@ -790,6 +814,7 @@ window.addEventListener('message', (event) => {
       }
       currentAssistantBubble = null;
       setGeneratingState(false);
+      unlockScrollAnchor();
       break;
   }
 });

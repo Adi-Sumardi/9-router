@@ -5,6 +5,26 @@ Versi sebelum 0.6.0 tidak memiliki catatan detail — lihat riwayat `.vsix` sebe
 sebagai referensi kasar (fitur Auto-Edit, Plan Mode, dan Model Routing Pool diperkenalkan
 bertahap dari 0.1.0 sampai 0.5.0).
 
+## 0.9.4 — Fix: Scroll Anchor Race Condition on Longer Conversations
+
+Follow-up to 0.9.3: the prompt scroll-anchor fix worked for the first couple of messages
+in a session but reverted to jumping to the bottom from the 3rd message onward.
+
+### Fixed
+- Root cause was a race condition: `sendMessage()` scheduled the anchor scroll via
+  `requestAnimationFrame`, but the very first streamed `chunk` for the response could
+  arrive and trigger `autoScrollIfNearBottom()` *before* that frame ran — and right after
+  appending the new prompt, the container legitimately still counted as "near bottom", so
+  that first chunk would win the race and force-scroll down before the anchor ever had a
+  chance. Early in a session, "top of the new prompt" and "the very bottom" are close
+  enough that this wasn't noticeable; the more content accumulates, the more they diverge,
+  which is why it only became visible from message 3 onward.
+- Replaced the timing-dependent approach with an explicit lock: `lockScrollAnchor()` sets a
+  flag that makes `autoScrollIfNearBottom()` a no-op for the entire duration of that turn,
+  removing the race entirely. The lock is released in the `done`/`stopped`/`error`
+  handlers (and defensively at the start of the next `sendMessage()`) so normal
+  follow-the-bottom behavior resumes afterward.
+
 ## 0.9.3 — Fix: Chat History Leak, Invisible Timeline Line, Prompt Scroll Anchor
 
 Batch of fixes from continued user testing.
