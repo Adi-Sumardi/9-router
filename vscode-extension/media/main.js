@@ -126,8 +126,13 @@ function autoScrollIfNearBottom() {
   }
 }
 
-function lockScrollAnchor(targetElem) {
-  scrollAnchorLocked = true;
+// Jadwalkan scrollIntoView ke `targetElem` di frame berikutnya. TIDAK mengatur
+// scrollAnchorLocked di sini — caller WAJIB set `scrollAnchorLocked = true` SENDIRI
+// sebelum memanggil ini (idealnya sebelum elemen apa pun ditambahkan ke DOM sama sekali),
+// karena fungsi lain seperti appendUserMessage()/createAssistantMessage() punya
+// auto-scroll masing-masing yang akan langsung lompat ke bawah kalau lock belum aktif
+// saat mereka dipanggil — itulah bug yang sempat lolos di percobaan sebelumnya.
+function scheduleAnchorScrollTo(targetElem) {
   requestAnimationFrame(() => {
     targetElem.scrollIntoView({ block: 'start', behavior: 'smooth' });
   });
@@ -552,10 +557,13 @@ function sendMessage() {
   const text = promptInput.value.trim();
   if (!text && currentAttachments.length === 0) return;
 
-  // Jaga-jaga: lepas lock anchor turn sebelumnya kalau karena suatu hal belum sempat
-  // ke-unlock (mis. 'done'/'stopped'/'error' tidak pernah sampai) — supaya auto-scroll
-  // tidak permanen macet untuk sisa sesi.
-  unlockScrollAnchor();
+  // Kunci PALING AWAL, sebelum elemen apa pun ditambahkan ke DOM. appendUserMessage() dan
+  // createAssistantMessage() di bawah masing-masing punya auto-scroll sendiri (autoScrollIfNearBottom)
+  // — kalau lock baru dipasang SETELAH keduanya dipanggil, mereka sempat lompat ke bawah
+  // duluan sebelum lock aktif (ini persis bug yang lolos di percobaan sebelumnya: lock
+  // dipasang lewat lockScrollAnchor() di akhir, padahal appendUserMessage/createAssistantMessage
+  // sudah lebih dulu memanggil auto-scroll masing-masing).
+  scrollAnchorLocked = true;
 
   // Hide Claude empty state
   const emptyState = document.getElementById('claude-empty-state');
@@ -579,9 +587,9 @@ function sendMessage() {
   currentAssistantBubble = createAssistantMessage();
   setGeneratingState(true);
 
-  // Kunci anchor ke prompt yang baru dikirim (lihat lockScrollAnchor) supaya tidak kalah
-  // balapan lawan auto-scroll dari chunk pertama yang bisa saja sudah masuk lebih dulu.
-  lockScrollAnchor(userMsgElem);
+  // Lock sudah aktif sejak awal fungsi ini — sekarang jadwalkan scroll aktualnya ke
+  // prompt yang baru dikirim (elemen-nya baru ada setelah appendUserMessage di atas).
+  scheduleAnchorScrollTo(userMsgElem);
 
   vscode.postMessage({
     type: 'prompt',

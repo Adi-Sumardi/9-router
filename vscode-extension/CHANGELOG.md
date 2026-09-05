@@ -5,6 +5,21 @@ Versi sebelum 0.6.0 tidak memiliki catatan detail — lihat riwayat `.vsix` sebe
 sebagai referensi kasar (fitur Auto-Edit, Plan Mode, dan Model Routing Pool diperkenalkan
 bertahap dari 0.1.0 sampai 0.5.0).
 
+## 0.9.5 — Fix: Lock Was Set Too Late, After Two Internal Auto-Scrolls Already Fired
+
+Follow-up to 0.9.4: the lock itself was correct, but it was still being armed *after* the
+two calls that most needed it had already run.
+
+### Fixed
+- `sendMessage()` called `appendUserMessage()` and `createAssistantMessage()` — each of
+  which triggers its own internal `autoScrollIfNearBottom()` — and only set
+  `scrollAnchorLocked = true` afterward. Both calls ran while the lock was still `false`,
+  so they jumped the view to the bottom exactly as before; the subsequent
+  `scrollIntoView({ block: 'start' })` was scheduled but the immediate visual jump had
+  already happened by then in practice. The lock now flips to `true` as the very first
+  line of `sendMessage()`, before any element is appended, so neither of those internal
+  auto-scrolls can fire at all during this turn's setup.
+
 ## 0.9.4 — Fix: Scroll Anchor Race Condition on Longer Conversations
 
 Follow-up to 0.9.3: the prompt scroll-anchor fix worked for the first couple of messages
