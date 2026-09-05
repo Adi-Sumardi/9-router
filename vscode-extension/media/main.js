@@ -98,6 +98,23 @@ const MODEL_NAMES = {
   'free': 'Free Tier'
 };
 
+// Auto-scroll pintar: HANYA ikut ke bawah kalau viewport memang sudah dekat bawah.
+// Dulu setiap toast/terminal-block/chunk baru langsung memaksa scroll ke paling bawah —
+// akibatnya, prompt yang BARU SAJA dikirim user (biasanya masih terlihat di dekat bawah
+// saat itu) langsung tergusur ke luar layar begitu respons/tool-call mulai mengisi ke
+// bawahnya, padahal user justru ingin melihat prompt-nya sendiri sambil membaca respons
+// yang mengalir (perilaku umum di ChatGPT/Claude.ai: prompt "menempel" di atas viewport).
+function isViewportNearBottom() {
+  const threshold = 96; // px toleransi
+  return messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight < threshold;
+}
+
+function autoScrollIfNearBottom() {
+  if (isViewportNearBottom()) {
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  }
+}
+
 // Send/Stop State Toggle
 function setGeneratingState(generating) {
   isGenerating = generating;
@@ -522,7 +539,7 @@ function sendMessage() {
   actionsPanel.innerHTML = '';
 
   // Append user bubble
-  appendUserMessage(text, currentAttachments);
+  const userMsgElem = appendUserMessage(text, currentAttachments);
 
   const attachmentsToSend = [...currentAttachments];
   currentAttachments = [];
@@ -534,6 +551,15 @@ function sendMessage() {
   // Create assistant bubble with Claude-style loading indicator
   currentAssistantBubble = createAssistantMessage();
   setGeneratingState(true);
+
+  // BUG FIX: prompt yang baru dikirim harus tetap terlihat di ATAS viewport selagi
+  // jawabannya mengalir mengisi ke bawah (kayak ChatGPT/Claude.ai) — sebelumnya
+  // createAssistantMessage() di atas langsung scroll ke paling BAWAH, jadi prompt yang
+  // baru saja dikirim langsung tergusur ke luar layar begitu ada konten baru sedikit saja.
+  // Jalankan setelah render berikutnya supaya tinggi elemen sudah pasti final.
+  requestAnimationFrame(() => {
+    userMsgElem.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  });
 
   vscode.postMessage({
     type: 'prompt',
@@ -632,7 +658,7 @@ window.addEventListener('message', (event) => {
       if (currentAssistantBubble) {
         currentAssistantBubble.rawText += message.text;
         currentAssistantBubble.contentElem.innerHTML = renderCleanChat(currentAssistantBubble.rawText, false);
-        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        autoScrollIfNearBottom();
       }
       break;
 
@@ -675,7 +701,7 @@ window.addEventListener('message', (event) => {
     case 'filesAutoReplaced':
       if (message.replaces && message.replaces.length > 0) {
         const details = message.replaces.map(r => `${getShortPath(r.file)}${r.line ? ` (L${r.line})` : ''}`).join(', ');
-        appendAutoExecToast('✨', `Surgical Replace: ${details}`);
+        appendAutoExecToast('✨', `Perbaikan Code: ${details}`);
       }
       break;
 
@@ -1003,7 +1029,8 @@ function appendUserMessage(text, attachments) {
 
   msg.innerHTML = `${attHtml}${escapeHtml(text)}`;
   messagesContainer.appendChild(msg);
-  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  autoScrollIfNearBottom();
+  return msg;
 }
 
 const THINKING_MESSAGES = [
@@ -1069,6 +1096,18 @@ function getOrCreateTimeline() {
   return currentTimelineContainer;
 }
 
+// Bungkus satu elemen aktivitas (toast/terminal-block/badge) dengan dot penanda + masukkan
+// ke timeline aktif — `status` menentukan warna dot ('running' merah berdenyut, 'success'
+// hijau, 'error' merah, atau kosong untuk abu-abu netral). Return wrapper-nya supaya
+// pemanggil bisa update status belakangan (mis. terminal block: running -> success/error).
+function appendTimelineNode(el, status) {
+  const wrapper = document.createElement('div');
+  wrapper.className = `timeline-node${status ? ' ' + status : ''}`;
+  wrapper.appendChild(el);
+  getOrCreateTimeline().appendChild(wrapper);
+  return wrapper;
+}
+
 function createAssistantMessage() {
   const emptyState = document.getElementById('claude-empty-state');
   if (emptyState) emptyState.style.display = 'none';
@@ -1094,7 +1133,7 @@ function createAssistantMessage() {
   `;
   msg.appendChild(content);
   messagesContainer.appendChild(msg);
-  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  autoScrollIfNearBottom();
 
   const loaderText = content.querySelector('.claude-loader-text');
   startThinkingProgress(loaderText);
@@ -1307,8 +1346,8 @@ function renderTerminalBlockStart(termId, command, desc) {
     </div>
     <pre class="terminal-stdout-view"></pre>
   `;
-  getOrCreateTimeline().appendChild(block);
-  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  const node = appendTimelineNode(block, 'running');
+  autoScrollIfNearBottom();
 
   const header = block.querySelector('.terminal-block-header');
   header?.addEventListener('click', () => {
@@ -1317,6 +1356,7 @@ function renderTerminalBlockStart(termId, command, desc) {
 
   activeTerminalBlocks.set(termId, {
     elem: block,
+    node,
     stdoutElem: block.querySelector('.terminal-stdout-view'),
     statusBadge: block.querySelector('.terminal-status-badge'),
     iconPulse: block.querySelector('.cmd-icon-pulse')
@@ -1350,6 +1390,9 @@ function resolveTerminalBlockEnd(termId, exitCode, durationMs, timedOut) {
   }
   if (entry.iconPulse) {
     entry.iconPulse.classList.remove('cmd-icon-pulse');
+  }
+  if (entry.node) {
+    entry.node.className = `timeline-node ${ok ? 'success' : 'error'}`;
   }
 }
 
@@ -1386,7 +1429,7 @@ function handleLoopStep(step, maxSteps, isLoop) {
   // — itu cukup, mengikuti alur yang lebih mirip timeline Claude Code (tanpa hitungan step).
   finalizeCurrentBubble();
   currentAssistantBubble = createAssistantMessage();
-  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  autoScrollIfNearBottom();
 }
 
 function handleStartFinalSummary() {
@@ -1398,26 +1441,26 @@ function handleStartFinalSummary() {
   const badge = document.createElement('div');
   badge.className = 'claude-loop-badge';
   badge.innerHTML = `<span>📝</span> <span><strong>Menyusun kesimpulan...</strong></span>`;
-  getOrCreateTimeline().appendChild(badge);
+  appendTimelineNode(badge, 'running');
 
   currentAssistantBubble = createAssistantMessage();
-  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  autoScrollIfNearBottom();
 }
 
 function handleTaskCompleted(summary) {
   const doneElem = document.createElement('div');
   doneElem.className = 'claude-done-badge';
   doneElem.innerHTML = `<span>✔</span> <span>${escapeHtml(summary || 'Tugas selesai dan diverifikasi otonom.')}</span>`;
-  getOrCreateTimeline().appendChild(doneElem);
-  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  appendTimelineNode(doneElem, 'success');
+  autoScrollIfNearBottom();
 }
 
 function appendAutoExecToast(icon, text) {
   const toast = document.createElement('div');
   toast.className = 'auto-exec-toast';
   toast.innerHTML = `<span class="toast-icon">${icon}</span><span class="toast-text">${escapeHtml(text)}</span>`;
-  getOrCreateTimeline().appendChild(toast);
-  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  appendTimelineNode(toast, 'success');
+  autoScrollIfNearBottom();
 }
 
 function getShortPath(fullPath) {
@@ -1655,8 +1698,8 @@ function renderFileReplaceCards(replaces) {
   const header = document.createElement('div');
   header.className = 'compact-panel-header';
   header.innerHTML = isPlanOnly
-    ? `<span>✨ Surgical Replace</span><span class="manual-badge">🔒 Plan-Only</span>`
-    : `<span>✨ Surgical Replace</span><span class="manual-badge">🛡️ Ask</span>`;
+    ? `<span>✨ Perbaikan Code</span><span class="manual-badge">🔒 Plan-Only</span>`
+    : `<span>✨ Perbaikan Code</span><span class="manual-badge">🛡️ Ask</span>`;
   container.appendChild(header);
 
   replaces.forEach(rep => {

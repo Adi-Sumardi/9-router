@@ -16,6 +16,14 @@ export interface ChatMessage {
   tool_calls?: ToolCallData[];
   /** Hanya untuk role 'tool' — menautkan hasil eksekusi ke tool_calls id di atas. */
   tool_call_id?: string;
+  /**
+   * True untuk pesan `role: 'user'` yang di-inject SISTEM (directive/nudge internal ke
+   * model, mis. "lanjutkan/rangkum sekarang") — BUKAN prompt asli yang diketik user.
+   * Ditandai supaya lapisan persistence/tampilan (SessionManager, riwayat chat) bisa
+   * membedakannya dari pesan user sungguhan tanpa mengandalkan pencocokan prefix teks
+   * yang rapuh.
+   */
+  internal?: boolean;
 }
 
 export interface ModelInfo {

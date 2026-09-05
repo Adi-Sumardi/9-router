@@ -16,6 +16,34 @@ export interface Session extends SessionMeta {
   messages: ChatMessage[];
 }
 
+/**
+ * True hanya untuk pesan yang layak ditampilkan sebagai riwayat chat sungguhan ke user:
+ * prompt asli user, dan jawaban asli assistant yang punya teks. Pesan `role: 'tool'`
+ * (hasil eksekusi native tool-calling) dan pesan `role: 'user'` yang ditandai `internal`
+ * (directive/nudge yang di-inject sistem ke model, mis. "lanjutkan/rangkum sekarang")
+ * BUKAN percakapan sungguhan — kalau ikut disimpan/ditampilkan, riwayat chat akan penuh
+ * teks directive mentah berulang-ulang alih-alih obrolan yang sebenarnya terjadi.
+ */
+export function isVisibleMessage(m: ChatMessage): boolean {
+  if (m.internal) return false;
+  if (m.role !== 'user' && m.role !== 'assistant') return false;
+  return typeof m.content === 'string' && m.content.trim().length > 0;
+}
+
+/**
+ * Filter ke pesan yang layak ditampilkan/disimpan, SEKALIGUS lepas field `tool_calls` dari
+ * assistant message yang lolos filter. Perlu: kalau kita membuang pesan `role: 'tool'`
+ * (hasil eksekusi native tool-calling) tapi tetap menyisakan `tool_calls` di assistant
+ * message pasangannya, hasilnya jadi referensi tool_calls yatim — request berikutnya ke
+ * provider native tool-calling akan invalid (400). Dipakai untuk riwayat yang ditampilkan
+ * ke user MAUPUN untuk merekonstruksi `_history` saat sebuah sesi lama dibuka kembali.
+ */
+export function sanitizeMessagesForHistory(messages: ChatMessage[]): ChatMessage[] {
+  return messages
+    .filter(isVisibleMessage)
+    .map(m => (m.role === 'assistant' && m.tool_calls ? { role: m.role, content: m.content } : m));
+}
+
 export class SessionManager {
   private static readonly SESSION_DIR = '.sendago/sessions';
 
@@ -55,15 +83,20 @@ export class SessionManager {
     const dir = this.getSessionsDir();
     if (!dir) return false;
 
+    // Simpan HANYA pesan yang layak ditampilkan sebagai riwayat chat (lihat isVisibleMessage)
+    // — bukan cuma buang system prompt (bisa di-rebuild), tapi juga buang seluruh noise
+    // orkestrasi internal (tool results, directive/nudge) supaya riwayat yang dibuka user
+    // nanti benar-benar mencerminkan percakapan sungguhan, bukan detail implementasi.
+    const visibleMessages = messages.filter(isVisibleMessage);
     const workspaceName = vscode.workspace.workspaceFolders?.[0]?.name || 'workspace';
     const meta: Session = {
       id,
-      title: title || this.generateTitle(messages),
+      title: title || this.generateTitle(visibleMessages),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      messageCount: messages.filter(m => m.role !== 'system').length,
+      messageCount: visibleMessages.length,
       workspaceName,
-      messages: messages.filter(m => m.role !== 'system') // Jangan simpan system prompt (bisa rebuild)
+      messages: visibleMessages
     };
 
     try {

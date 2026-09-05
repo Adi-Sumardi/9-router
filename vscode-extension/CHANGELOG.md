@@ -5,6 +5,42 @@ Versi sebelum 0.6.0 tidak memiliki catatan detail — lihat riwayat `.vsix` sebe
 sebagai referensi kasar (fitur Auto-Edit, Plan Mode, dan Model Routing Pool diperkenalkan
 bertahap dari 0.1.0 sampai 0.5.0).
 
+## 0.9.3 — Fix: Chat History Leak, Invisible Timeline Line, Prompt Scroll Anchor
+
+Batch of fixes from continued user testing.
+
+### Fixed
+- **Chat history showed raw internal directive text as fake user messages.** The
+  `nativeNudge`/legacy directive/final-summary-turn messages injected into `_history` to
+  steer the model (added in 0.9.0–0.9.2) are pushed with `role: 'user'`, and the session
+  history loader only filtered a few hardcoded legacy prefixes — so opening an old
+  conversation showed repeated `"[Directive: Tool results above are ready...]"` bubbles
+  instead of the real conversation. `ChatMessage` now has an explicit `internal` flag;
+  `SessionManager` only persists/displays genuine user prompts and non-empty assistant
+  replies (`isVisibleMessage`/`sanitizeMessagesForHistory` in `sessionManager.ts`), and
+  strips orphaned `tool_calls` from any assistant message whose paired tool results were
+  dropped. Applied retroactively when loading old sessions too, not just new saves.
+- **The connected timeline line was invisible in every prior 0.9.x release** — turns out
+  `--border-soft`, `--text-muted`, `--accent`, `--accent-2`, and `--accent-soft` were
+  referenced across the stylesheet (including the new `.agent-timeline` connector) but
+  never actually defined as CSS custom properties. For a non-inherited property like
+  `background`, an unresolved `var()` computes to `transparent` — so the line was always
+  rendered, just completely invisible. Added them as aliases to the tokens that were
+  clearly intended (`--claude-border`, `--claude-text-muted`, `--sendago-maroon` family),
+  fixing this and several other silently-mis-colored elements at once.
+- Added actual dot markers on each timeline node (gray/pulsing-red while running, green on
+  success, red on failure) to match Claude Code's own connected-timeline look.
+- **A newly sent prompt was immediately pushed out of view** by the very next auto-scroll
+  once a response/tool-call started streaming below it. Scrolling now only auto-follows
+  the bottom if the viewport was already near the bottom (`autoScrollIfNearBottom`), and
+  sending a new message explicitly anchors that message to the *top* of the viewport
+  (`scrollIntoView({ block: 'start' })`) so it stays visible while the answer fills in below
+  — matching ChatGPT/Claude.ai's behavior instead of chasing the latest line to the bottom.
+
+### Changed
+- User-facing label "Surgical Replace" renamed to "Perbaikan Code" in the auto-exec toast
+  and the manual review panel header.
+
 ## 0.9.2 — Fix: Timeline Grouping for Single-Action Turns + Network Hang Timeout
 
 Follow-up to 0.9.1 based on user testing: the connected timeline from 0.9.1 still looked

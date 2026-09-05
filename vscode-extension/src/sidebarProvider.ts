@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import { NineRouterClient, ChatMessage, ToolCallData } from './routerClient';
 import { AgentEngine, AgentMode, FileEditAction, FileReplaceAction, GrepAction, FindFilesAction, ReadFileAction, CommandAction, ImageAction } from './agentEngine';
 import { AgentTools } from './agentTools';
-import { SessionManager } from './sessionManager';
+import { SessionManager, sanitizeMessagesForHistory } from './sessionManager';
 import { getToolDefinitionsForMode } from './toolSchemas';
 import { ProjectSettings, PermissionMode } from './projectSettings';
 
@@ -112,11 +112,18 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
             const session = SessionManager.load(data.sessionId);
             if (session) {
               this._sessionId = session.id;
+              // Sanitasi dulu (buang tool result/directive internal + tool_calls yatim) —
+              // sesi lama yang sempat kesimpan sebelum fix ini masih bisa berisi noise
+              // tersebut, jadi tidak cukup andalkan SessionManager.save() yang baru.
+              const cleanMessages = sanitizeMessagesForHistory(session.messages);
               this._history = [
                 { role: 'system', content: AgentEngine.getSystemPrompt(this._currentMode) },
-                ...session.messages
+                ...cleanMessages
               ];
-              this._view?.webview.postMessage({ type: 'sessionLoaded', session });
+              this._view?.webview.postMessage({
+                type: 'sessionLoaded',
+                session: { ...session, messages: cleanMessages }
+              });
             }
           }
           break;
@@ -469,7 +476,8 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
   private async runFinalSummaryTurn(targetModel: string, controller: AbortController, reason: string): Promise<void> {
     this._history.push({
       role: 'user',
-      content: `[Directive: Stop calling any tools now. ${reason} In natural Indonesian, summarize clearly what has been accomplished/found so far, your conclusion, and any remaining next steps the user should take. Respond with plain text only — no tool calls, no <sendago_*> tags.]`
+      content: `[Directive: Stop calling any tools now. ${reason} In natural Indonesian, summarize clearly what has been accomplished/found so far, your conclusion, and any remaining next steps the user should take. Respond with plain text only — no tool calls, no <sendago_*> tags.]`,
+      internal: true
     });
 
     this._view?.webview.postMessage({ type: 'startFinalSummary' });
@@ -972,7 +980,7 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
             const nativeNudge = writeExecAllowed
               ? `[Directive: Tool results above are ready. Do NOT repeat or echo them verbatim. In natural Indonesian, tell the user what was observed, then continue now — call the next tool if more work remains, or call task_done once everything is verified complete. Do not stay silent.]`
               : `[Directive: The tool result above is now available. Do NOT repeat or echo it verbatim. Answer the user's question in natural Indonesian using this information now — only call another tool if genuinely still needed.]`;
-            this._history.push({ role: 'user', content: nativeNudge });
+            this._history.push({ role: 'user', content: nativeNudge, internal: true });
           }
         } else {
           // Directive khusus mode non-autonomous (Chat/Plan, atau Agent tanpa autoExecute):
@@ -986,7 +994,8 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
               : `[Directive: The read-only result above (grep/find/read) is now available. Do NOT repeat or echo it verbatim. Answer the user's question in natural Indonesian using this information now — only request another tool if genuinely still needed.]`;
           this._history.push({
             role: 'user',
-            content: `${feedbackContent}\n${directive}`
+            content: `${feedbackContent}\n${directive}`,
+            internal: true
           });
         }
 

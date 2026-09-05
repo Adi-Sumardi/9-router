@@ -26,6 +26,20 @@
   --claude-border: rgba(255, 255, 255, 0.07);
   --claude-border-subtle: rgba(255, 255, 255, 0.04);
 
+  /* BUG FIX: alias di bawah ini dipakai di puluhan rule di seluruh file (garis timeline,
+     border kartu, warna teks redup, warna aksen shimmer/blockquote/tombol) tapi TIDAK
+     PERNAH didefinisikan sebagai custom property — var() yang gagal resolve otomatis jadi
+     `transparent` untuk properti seperti `background` (bukan diwarisi), makanya garis
+     penghubung timeline selama ini benar-benar tidak terlihat sama sekali, bukan cuma
+     samar. Alias ke token yang sudah ada supaya seluruh rule lama otomatis ikut benar
+     tanpa perlu diubah satu-satu.
+     */
+  --border-soft: var(--claude-border);
+  --text-muted: var(--claude-text-muted);
+  --accent: var(--sendago-maroon);
+  --accent-2: var(--sendago-maroon-hover);
+  --accent-soft: var(--sendago-maroon-soft);
+
   /* Semantic status colors */
   --success: #10b981;
   --success-soft: rgba(16, 185, 129, 0.14);
@@ -614,15 +628,59 @@ body {
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin: 2px 0 2px 4px;
-  padding-left: 10px;
-  border-left: 1px solid var(--border-soft);
+  gap: 10px;
+  margin: 8px 0 8px 4px;
+  padding-left: 20px;
+}
+
+/* Garis vertikal penghubung antar node — dipasang di wrapper (bukan tiap komponen), jadi
+   selalu tersambung mulus terlepas dari struktur internal terminal-block/toast/badge. */
+.agent-timeline::before {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 8px;
+  bottom: 8px;
+  width: 1px;
+  background: var(--border-soft);
 }
 
 .agent-timeline > * {
   margin-top: 0 !important;
   margin-bottom: 0 !important;
+}
+
+/* Satu "node" timeline = dot bulat + konten aslinya (toast/terminal-block/badge) — dot
+   ditaruh di wrapper ini, bukan di komponen aslinya, supaya tidak bentrok dengan
+   pseudo-element milik komponen tsb sendiri. */
+.timeline-node {
+  position: relative;
+}
+
+.timeline-node::before {
+  content: '';
+  position: absolute;
+  left: -20px;
+  top: 9px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--claude-text-muted);
+  box-shadow: 0 0 0 3px var(--claude-bg);
+  z-index: 1;
+}
+
+.timeline-node.running::before {
+  background: var(--sendago-maroon);
+  animation: timelineNodePulse 1.2s ease-in-out infinite;
+}
+
+.timeline-node.success::before { background: var(--success); }
+.timeline-node.error::before { background: var(--danger); }
+
+@keyframes timelineNodePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 
 /* Claude Code Terminal Output Block */
