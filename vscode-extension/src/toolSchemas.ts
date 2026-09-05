@@ -188,6 +188,19 @@ const AGENT_TOOLS: ToolDefinition[] = [
 
 const PLAN_TOOLS: ToolDefinition[] = [CREATE_PLAN];
 
+/**
+ * Subset TANPA kemampuan mengubah apa pun — cuma baca & sinyal selesai. Dipakai saat
+ * langkah eksplorasi dialihkan ke model murah (token saver): model murah secara struktural
+ * tidak diberi tool tulis/eksekusi, jadi mustahil dia yang menulis kode. Kalau ternyata
+ * langkahnya sudah waktunya menulis, sidebarProvider mendeteksinya dan mengulang langkah
+ * itu dengan model utama (lihat streamStepWithModelRotation).
+ */
+const READ_ONLY_TOOLS: ToolDefinition[] = [GREP_WORKSPACE, FIND_FILES, READ_FILE, TASK_DONE];
+
 export function getToolDefinitionsForMode(mode: string): ToolDefinition[] {
   return mode === 'plan' ? PLAN_TOOLS : AGENT_TOOLS;
+}
+
+export function getReadOnlyToolDefinitionsForMode(mode: string): ToolDefinition[] {
+  return mode === 'plan' ? PLAN_TOOLS : READ_ONLY_TOOLS;
 }

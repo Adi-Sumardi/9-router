@@ -5,7 +5,7 @@ import { NineRouterClient, ChatMessage, ToolCallData } from './routerClient';
 import { AgentEngine, AgentMode, FileEditAction, FileReplaceAction, GrepAction, FindFilesAction, ReadFileAction, CommandAction, ImageAction } from './agentEngine';
 import { AgentTools } from './agentTools';
 import { SessionManager, sanitizeMessagesForHistory } from './sessionManager';
-import { getToolDefinitionsForMode } from './toolSchemas';
+import { getToolDefinitionsForMode, getReadOnlyToolDefinitionsForMode } from './toolSchemas';
 import { ProjectSettings, PermissionMode } from './projectSettings';
 
 export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
@@ -499,6 +499,40 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Ubah satu respons model jadi daftar aksi — native tool_calls diprioritaskan, kalau
+   * kosong jatuh ke regex-parsing tag teks <sendago_*> (jalur fallback untuk provider yang
+   * tidak mendukung function-calling).
+   */
+  private parseActionsFromResponse(rawToolCalls: ToolCallData[], fullResponse: string) {
+    return rawToolCalls.length > 0
+      ? AgentEngine.buildActionsFromToolCalls(rawToolCalls)
+      : {
+          edits: AgentEngine.parseFileEdits(fullResponse),
+          replaces: AgentEngine.parseFileReplaces(fullResponse),
+          greps: AgentEngine.parseGrepActions(fullResponse),
+          finds: AgentEngine.parseFindFilesActions(fullResponse),
+          commands: AgentEngine.parseTerminalCommands(fullResponse),
+          reads: AgentEngine.parseReadFileActions(fullResponse),
+          done: AgentEngine.parseTaskDone(fullResponse),
+          images: AgentEngine.parseImageActions(fullResponse),
+          planSteps: AgentEngine.parsePlanSteps(fullResponse)
+        };
+  }
+
+  /** True kalau langkah ini mengubah/mengeksekusi sesuatu — bukan sekadar membaca. */
+  private hasWriteOrExecAction(parsed: {
+    edits: FileEditAction[];
+    replaces: FileReplaceAction[];
+    commands: CommandAction[];
+    images: ImageAction[];
+  }): boolean {
+    return parsed.edits.length > 0
+      || parsed.replaces.length > 0
+      || parsed.commands.length > 0
+      || parsed.images.length > 0;
+  }
+
+  /**
    * Fingerprint dari SEMUA aksi yang diminta model pada satu turn — dipakai untuk
    * mendeteksi stagnasi (model mengulang tool call PERSIS SAMA berkali-kali tanpa
    * progres nyata, mis. grep/find dengan query yang identik). Ini pengganti "hitung
@@ -657,11 +691,17 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
     this._history.push({ role: 'user', content: promptText });
 
     const isClaudeCode = this._currentMode === 'claude-code' || this._currentMode === 'agent';
-    // Fallback nyata: bukan cuma satu model ID tetap, tapi daftar kandidat dari model yang
-    // BENERAN aktif di gateway (lihat resolveModelChainForPool) — kalau kandidat pertama
-    // gagal/timeout, streamChatWithFallback() otomatis lanjut ke kandidat berikutnya.
-    const modelChain = await this._client.resolveModelChainForPool(pool);
+    // Fallback nyata + rotasi model: `chain` untuk langkah berat (tulis kode/jalankan
+    // perintah), `lightChain` untuk langkah ringan (mencerna hasil pencarian, menyusun
+    // kesimpulan). Keduanya punya state index sendiri supaya kalau satu kandidat mati,
+    // yang diingat cuma untuk jenis langkah yang bersangkutan.
+    const modelPlan = await this._client.resolveModelPlanForPool(pool);
+    const modelChain = modelPlan.chain;
     const modelChainState = { index: 0 };
+    const lightChainState = { index: 0 };
+    // Langkah pertama selalu pakai model utama: di sinilah task dipahami & rencana disusun.
+    let nextStepIsLight = false;
+    let lightModelNoticeShown = false;
 
     // Permission mode: .sendago/settings.json milik REPO (bisa di-commit, berlaku untuk
     // semua kontributor) menang atas setting personal `sendago.autoExecute` di VS Code —
@@ -721,20 +761,55 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
         // function-calling akan balas lewat toolCalls terstruktur; provider yang tidak
         // mendukungnya akan mengabaikan field ini dan tetap balas teks tag <sendago_*>
         // (jalur fallback parseFileEdits/dst di bawah tetap berjalan seperti sebelumnya).
-        // streamChatWithFallback mencoba modelChain berurutan kalau kandidat pertama gagal
+        // streamChatWithFallback mencoba chain berurutan kalau kandidat pertama gagal
         // (lihat method-nya) — fullResponse diambil dari return value (bukan diakumulasi
         // manual di sini) supaya tidak tercampur dengan chunk dari attempt yang gagal.
-        const { text: streamedText, toolCalls: rawToolCalls } = await this.streamChatWithFallback(
-          modelChain,
-          modelChainState,
+        // Rotasi model: langkah yang cuma perlu mencerna hasil pencarian dipindah ke
+        // lightChain (model termurah), langkah berat tetap di model utama pool.
+        const useLightModel = nextStepIsLight && modelPlan.lightChain.length > 0;
+
+        if (useLightModel && !lightModelNoticeShown) {
+          lightModelNoticeShown = true;
+          this._view?.webview.postMessage({
+            type: 'assistantMessage',
+            text: `💡 **Hemat token:** langkah eksplorasi memakai model ringan \`${modelPlan.lightChain[lightChainState.index]}\` — model utama disimpan untuk menulis/memperbaiki kode.`
+          });
+        }
+
+        const runStepAttempt = (light: boolean) => this.streamChatWithFallback(
+          light ? modelPlan.lightChain : modelChain,
+          light ? lightChainState : modelChainState,
           (chunk) => {
             this._view?.webview.postMessage({ type: 'chunk', text: chunk });
           },
           controller,
-          getToolDefinitionsForMode(this._currentMode)
+          // Model ringan TIDAK diberi tool tulis/eksekusi sama sekali — secara struktural
+          // mustahil dia yang menulis kode.
+          light
+            ? getReadOnlyToolDefinitionsForMode(this._currentMode)
+            : getToolDefinitionsForMode(this._currentMode)
         );
-        fullResponse = streamedText;
 
+        let attempt = await runStepAttempt(useLightModel);
+        let parsed = this.parseActionsFromResponse(attempt.toolCalls, attempt.text);
+
+        // PENGAMAN ANTI-TURUN-KUALITAS: kalau langkah ini ternyata sudah waktunya menulis
+        // atau menjalankan sesuatu, model ringan tidak boleh yang mengerjakannya. Tool
+        // tulis memang tidak diberikan ke dia, tapi dia masih bisa mengemit tag teks
+        // <sendago_edit>/<sendago_cmd> lewat jalur fallback — jadi hasilnya dibuang dan
+        // langkah yang sama diulang memakai model utama.
+        if (useLightModel && this.hasWriteOrExecAction(parsed)) {
+          this._view?.webview.postMessage({ type: 'resetCurrentBubble' });
+          this._view?.webview.postMessage({
+            type: 'assistantMessage',
+            text: '↩️ Langkah ini ternyata perlu menulis/menjalankan sesuatu — dikembalikan ke model utama agar kualitas kode tetap terjaga.'
+          });
+          attempt = await runStepAttempt(false);
+          parsed = this.parseActionsFromResponse(attempt.toolCalls, attempt.text);
+        }
+
+        fullResponse = attempt.text;
+        const rawToolCalls = attempt.toolCalls;
         const isNativeToolCall = rawToolCalls.length > 0;
 
         if (isNativeToolCall) {
@@ -747,21 +822,6 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
           this._history.push({ role: 'assistant', content: fullResponse });
         }
 
-        // Parse tool actions — native tool_calls (kalau ada) diprioritaskan; kalau kosong,
-        // fallback ke regex-parsing tag teks <sendago_*> seperti sebelumnya.
-        const parsed = isNativeToolCall
-          ? AgentEngine.buildActionsFromToolCalls(rawToolCalls)
-          : {
-              edits: AgentEngine.parseFileEdits(fullResponse),
-              replaces: AgentEngine.parseFileReplaces(fullResponse),
-              greps: AgentEngine.parseGrepActions(fullResponse),
-              finds: AgentEngine.parseFindFilesActions(fullResponse),
-              commands: AgentEngine.parseTerminalCommands(fullResponse),
-              reads: AgentEngine.parseReadFileActions(fullResponse),
-              done: AgentEngine.parseTaskDone(fullResponse),
-              images: AgentEngine.parseImageActions(fullResponse),
-              planSteps: AgentEngine.parsePlanSteps(fullResponse)
-            };
         const { edits, replaces, greps, finds, commands, reads, done, images, planSteps } = parsed;
 
         // Hasil eksekusi per tool_call (jalur native) — dipakai pushNativeToolResults di
@@ -812,6 +872,10 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
 
         let executedAny = false;
         let feedbackContent = '';
+        // Dipakai untuk memutuskan jenis model giliran berikutnya: begitu ada yang gagal
+        // (replace tidak ketemu, command exit != 0, file tidak terbaca), giliran berikutnya
+        // butuh penalaran serius untuk memperbaikinya — jangan dialihkan ke model ringan.
+        let stepHadFailure = false;
 
         // 1. Terapkan Surgical Search-and-Replace (Prioritas Utama untuk File Eksis)
         if (writeExecAllowed && replaces.length > 0) {
@@ -824,10 +888,12 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
                 appliedReplaces.push({ file: rep.filePath, line: res.line });
                 if (rep.toolCallId) toolResultById.set(rep.toolCallId, `Replace applied successfully to ${rep.filePath} at line ${res.line}.`);
               } else {
+                stepHadFailure = true;
                 failedReplaces.push({ file: rep.filePath, error: res.error });
                 if (rep.toolCallId) toolResultById.set(rep.toolCallId, `Replace FAILED on ${rep.filePath}: ${res.error}`);
               }
             } catch (err: any) {
+              stepHadFailure = true;
               failedReplaces.push({ file: rep.filePath, error: err.message });
               if (rep.toolCallId) toolResultById.set(rep.toolCallId, `Replace FAILED on ${rep.filePath}: ${err.message}`);
             }
@@ -849,11 +915,16 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
           for (const edit of edits) {
             try {
               const ok = await AgentTools.applyWorkspaceEdit(edit.filePath, edit.newContent);
-              if (ok) appliedFiles.push(edit.filePath);
+              if (ok) {
+                appliedFiles.push(edit.filePath);
+              } else {
+                stepHadFailure = true;
+              }
               if (edit.toolCallId) {
                 toolResultById.set(edit.toolCallId, ok ? `File written successfully: ${edit.filePath}` : `File write rejected (empty content guard): ${edit.filePath}`);
               }
             } catch (err: any) {
+              stepHadFailure = true;
               if (edit.toolCallId) toolResultById.set(edit.toolCallId, `File write FAILED: ${edit.filePath}: ${err.message}`);
             }
           }
@@ -913,6 +984,7 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
               feedbackContent += `\n[File Content: ${readAction.filePath}]\n\`\`\`\n${content.slice(0, 15000)}\n\`\`\`\n`;
               if (readAction.toolCallId) toolResultById.set(readAction.toolCallId, `File: ${readAction.filePath}\n${content.slice(0, 15000)}`);
             } catch (err: any) {
+              stepHadFailure = true;
               feedbackContent += `\n[File Not Found or Unreadable: ${readAction.filePath}: ${err.message}]\n`;
               if (readAction.toolCallId) toolResultById.set(readAction.toolCallId, `File not found or unreadable: ${readAction.filePath}: ${err.message}`);
             }
@@ -963,6 +1035,7 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
               this._view?.webview.postMessage({ type: 'serverStartedToast', command: cmd.command });
             }
 
+            if (res.exitCode !== 0 || res.timedOut) stepHadFailure = true;
             const cleanStdout = (res.stdout || '').trim().slice(0, 5000);
             const cleanStderr = (res.stderr || '').trim().slice(0, 3000);
             feedbackContent += `\n[Observed Command Output]\n$ ${cmd.command}\nStatus: ${res.exitCode === 0 ? 'Success (Exit 0)' : `Failed (Exit ${res.exitCode})`} (${res.durationMs}ms)\n`;
@@ -1024,6 +1097,14 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
         // bukan mengerjakan sesuatu yang baru. Ini pengganti "hitung step" sebagai sinyal
         // berhenti utama — task kompleks yang tiap langkahnya genuinely berbeda TIDAK akan
         // pernah kena ini, berapa pun banyaknya langkah.
+        // Rotasi model untuk giliran BERIKUTNYA: kalau giliran ini murni eksplorasi
+        // read-only (grep/find/read) dan semuanya mulus, giliran berikutnya cuma perlu
+        // mencerna hasil pencarian — cukup pakai model ringan. Begitu ada tulis/eksekusi
+        // atau ada yang gagal, balik lagi ke model utama karena butuh penalaran serius.
+        const didWriteOrExecute = replaces.length > 0 || edits.length > 0 || commands.length > 0 || images.length > 0;
+        const didReadOnlyOnly = (greps.length > 0 || finds.length > 0 || reads.length > 0) && !didWriteOrExecute;
+        nextStepIsLight = didReadOnlyOnly && !stepHadFailure;
+
         const actionSignature = this.computeActionSignature(replaces, edits, greps, finds, reads, commands, images);
         if (actionSignature && actionSignature === lastActionSignature) {
           repeatStreak++;
@@ -1074,9 +1155,11 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
         }
 
         if (isStagnant) {
+          // Giliran ringkasan = murni merangkum apa yang sudah terjadi, tidak menulis kode
+          // dan tidak memanggil tool — cukup pakai lightChain supaya tidak boros token.
           await this.runFinalSummaryTurn(
-            modelChain,
-            modelChainState,
+            modelPlan.lightChain,
+            lightChainState,
             controller,
             'You have repeated the exact same tool call multiple times in a row without making new progress.'
           );
@@ -1084,9 +1167,11 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
         }
 
         if (stepLimitHit) {
+          // Giliran ringkasan = murni merangkum apa yang sudah terjadi, tidak menulis kode
+          // dan tidak memanggil tool — cukup pakai lightChain supaya tidak boros token.
           await this.runFinalSummaryTurn(
-            modelChain,
-            modelChainState,
+            modelPlan.lightChain,
+            lightChainState,
             controller,
             `You have used all ${maxSteps} available autonomous steps for this task.`
           );

@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { ToolDefinition } from './toolSchemas';
+import { buildModelChain, buildLightChain } from './modelRouting';
 
 /** Satu tool_call terstruktur (OpenAI-compatible function-calling format). */
 export interface ToolCallData {
@@ -122,20 +123,6 @@ export class NineRouterClient {
   }
 
   /**
-   * Klasifikasi kasar model berdasarkan pola nama ID-nya saja (9Router tidak mengekspos
-   * metadata tier/biaya lewat /v1/models, cuma {id, owned_by}) — dipakai untuk menyusun
-   * urutan fallback yang masuk akal per pool. Ini heuristik, bukan sumber kebenaran:
-   * kalau nama model di gateway Anda tidak cocok pola ini, dia jatuh ke 'other' dan tetap
-   * ikut di fallback chain, cuma urutannya mungkin kurang optimal.
-   */
-  private categorizeModel(id: string): 'free' | 'pro' | 'other' {
-    const lower = id.toLowerCase();
-    if (/\bfree\b|groq|gemma|flash-free/.test(lower)) return 'free';
-    if (/unlimited|\bpro\b|opus|sonnet|gpt-4|\bo3\b|\br1\b|deepseek/.test(lower)) return 'pro';
-    return 'other';
-  }
-
-  /**
    * Bangun daftar model fallback untuk satu pool — BUKAN cuma satu model ID seperti
    * resolveModelForPool(). Diambil dari model yang BENERAN aktif di gateway Anda
    * (/v1/models), jadi kalau Anda mengaktifkan banyak provider, semuanya jadi kandidat
@@ -150,7 +137,7 @@ export class NineRouterClient {
    */
   public async resolveModelChainForPool(poolOverride?: string): Promise<string[]> {
     const primary = this.resolveModelForPool(poolOverride);
-    const pool = (poolOverride || this.modelPool || '').toLowerCase();
+    const pool = poolOverride || this.modelPool || '';
 
     let available: string[];
     try {
@@ -159,23 +146,34 @@ export class NineRouterClient {
       available = [];
     }
 
-    const others = available.filter(m => m !== primary);
-    if (others.length === 0) return [primary];
+    return buildModelChain(pool, primary, available);
+  }
 
-    const free = others.filter(m => this.categorizeModel(m) === 'free');
-    const pro = others.filter(m => this.categorizeModel(m) === 'pro');
-    const rest = others.filter(m => this.categorizeModel(m) === 'other');
+  public get tokenSaverEnabled(): boolean {
+    const config = vscode.workspace.getConfiguration('sendago');
+    return config.get<boolean>('tokenSaver') ?? true;
+  }
 
-    if (pool === 'pro' || pool === 'paid' || pool === 'claude') {
-      return [primary, ...pro, ...rest];
+  /**
+   * Rencana pemakaian model untuk satu giliran user — dua chain yang saling melengkapi,
+   * bukan satu model dipakai untuk semua langkah:
+   *
+   * - `chain`      : langkah BERAT (menulis/mengubah kode, menjalankan perintah, memperbaiki
+   *                  error) — pakai model utama pool ini, kualitas diutamakan.
+   * - `lightChain` : langkah RINGAN (mencerna hasil grep/find/read, menyusun kesimpulan akhir)
+   *                  — pakai model termurah yang tersedia. Langkah seperti ini porsinya besar
+   *                  di satu task otonom panjang tapi tidak butuh model termahal, jadi di
+   *                  sinilah penghematan token paling terasa tanpa menurunkan kualitas kode.
+   *
+   * Pool `pro` sengaja TIDAK diturunkan ke model gratisan bahkan untuk langkah ringan,
+   * mengikuti kebijakan paid/* di ARCHITECTURE.md.
+   */
+  public async resolveModelPlanForPool(poolOverride?: string): Promise<{ chain: string[]; lightChain: string[] }> {
+    const chain = await this.resolveModelChainForPool(poolOverride);
+    if (!this.tokenSaverEnabled) {
+      return { chain, lightChain: chain };
     }
-    if (pool === 'free' || pool === 'free-coding') {
-      return [primary, ...free, ...rest, ...pro];
-    }
-    if (pool === 'hybrid' || pool === 'hybrid-coding') {
-      return [primary, ...pro, ...rest, ...free];
-    }
-    return [primary, ...rest, ...pro, ...free];
+    return { chain, lightChain: buildLightChain(poolOverride || this.modelPool || '', chain) };
   }
 
   /**

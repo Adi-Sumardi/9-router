@@ -5,6 +5,34 @@ Versi sebelum 0.6.0 tidak memiliki catatan detail — lihat riwayat `.vsix` sebe
 sebagai referensi kasar (fitur Auto-Edit, Plan Mode, dan Model Routing Pool diperkenalkan
 bertahap dari 0.1.0 sampai 0.5.0).
 
+## 0.12.0 — Token Saver: Models Take Turns Instead of One Doing Everything
+
+Previously a 20-step autonomous task called the pool's primary model 20 times, including
+for steps that only digest grep/read output. Models now rotate by the kind of work.
+
+### Added
+- `sendago.tokenSaver` setting (default `true`). Each turn now resolves a **model plan**
+  with two complementary chains: `chain` for heavy steps (writing code, running commands,
+  fixing errors) and `lightChain` — cheapest available model first — for light steps
+  (digesting read-only results, writing the final summary).
+- Steps are classified from what the *previous* step did: after a purely read-only turn
+  that hit no failures, the next step runs light; any write/exec action or any failure
+  (replace not found, non-zero exit, unreadable file) sends it straight back to the
+  primary model. The final summary turn always runs light.
+- **Anti-degradation guard** — the light model is never allowed to author code. It is only
+  given read-only tools (`grep_workspace`, `find_files`, `read_file`, `task_done`), and if
+  it nevertheless emits a write/exec action through the text-tag fallback path, that
+  attempt is discarded (its partial output cleared from the bubble) and the same step is
+  re-run on the primary model. The discarded attempt never enters conversation history.
+- Pool `pro` is exempt from downgrading to a free-tier model even for light steps, per the
+  paid/* policy in ARCHITECTURE.md.
+
+### Changed
+- Model ordering logic extracted to `src/modelRouting.ts` as pure functions
+  (`categorizeModel`, `buildModelChain`, `buildLightChain`) and covered by 14 new unit
+  tests — these rules decide both cost and quality, so they needed to be testable rather
+  than buried in a class that depends on `vscode`. Test suite is now 39 tests.
+
 ## 0.11.1 — Fix: The Actual Reason the Prompt Never Stayed at the Top
 
 Three previous attempts (0.9.3, 0.9.4, 0.9.5) treated this as a timing/race problem and
