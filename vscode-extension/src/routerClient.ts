@@ -123,86 +123,139 @@ export class NineRouterClient {
     const config = vscode.workspace.getConfiguration('sendago');
     const temperature = config.get<number>('temperature') ?? 0.2;
 
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature,
-        stream: true,
-        ...(tools && tools.length > 0 ? { tools, tool_choice: 'auto' } : {})
-      }),
-      signal
-    });
+    // BUG FIX: sebelumnya tidak ada batas waktu sama sekali di luar `signal` milik user
+    // (tombol Stop) — kalau gateway/model provider hang di tengah jalan (network hiccup,
+    // upstream provider gantung), `await reader.read()` bisa menunggu SELAMANYA tanpa
+    // error apa pun, dan UI cuma diam menampilkan shimmer loader tanpa batas (dilaporkan
+    // user: macet total di step terakhir tanpa pesan apa pun). Sekarang setiap fase
+    // (menunggu response awal, menunggu potongan stream berikutnya) punya inactivity
+    // timeout terpisah dari AbortController milik user, supaya kalau macet, user dapat
+    // pesan error yang jelas alih-alih diam selamanya.
+    const INACTIVITY_TIMEOUT_MS = 90000;
+    const internalController = new AbortController();
+    const onExternalAbort = () => internalController.abort();
+    signal?.addEventListener('abort', onExternalAbort);
 
-    if (!res.ok) {
-      const errBody = await res.text();
-      throw new Error(`9Router error (${res.status}): ${errBody}`);
-    }
+    let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+    const armInactivityTimer = () => {
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(() => internalController.abort(), INACTIVITY_TIMEOUT_MS);
+    };
+    const disarmInactivityTimer = () => {
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      inactivityTimer = undefined;
+    };
+    // True hanya kalau abort ini berasal dari timer inactivity kita, BUKAN dari user klik Stop
+    // (yang juga men-trigger internalController via forwarding) — jaga pesan 'stopped' asli
+    // tombol Stop tetap seperti semula, hanya hang murni yang dapat pesan timeout baru ini.
+    const isInactivityAbort = (err: unknown) =>
+      err instanceof Error && err.name === 'AbortError' && !signal?.aborted;
 
-    let fullText = '';
-    const body = res.body;
-    if (!body) throw new Error('Response body is empty');
+    try {
+      armInactivityTimer();
+      let res: Response;
+      try {
+        res = await fetch(`${this.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+          },
+          body: JSON.stringify({
+            model,
+            messages,
+            temperature,
+            stream: true,
+            ...(tools && tools.length > 0 ? { tools, tool_choice: 'auto' } : {})
+          }),
+          signal: internalController.signal
+        });
+      } catch (err) {
+        if (isInactivityAbort(err)) {
+          throw new Error(`SendaGo: Gateway 9Router tidak merespons selama lebih dari ${INACTIVITY_TIMEOUT_MS / 1000} detik (koneksi kemungkinan macet). Periksa status gateway lalu coba lagi.`);
+        }
+        throw err;
+      }
 
-    const reader = body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    let buffer = '';
+      if (!res.ok) {
+        const errBody = await res.text();
+        throw new Error(`9Router error (${res.status}): ${errBody}`);
+      }
 
-    // Delta tool_calls datang bertahap (nama & argumen di-stream per-karakter/potongan),
-    // diindeks oleh `index` per OpenAI streaming spec — harus diakumulasi sampai selesai.
-    const toolCallAccum = new Map<number, { id: string; name: string; args: string }>();
+      let fullText = '';
+      const body = res.body;
+      if (!body) throw new Error('Response body is empty');
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      const reader = body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      // Delta tool_calls datang bertahap (nama & argumen di-stream per-karakter/potongan),
+      // diindeks oleh `index` per OpenAI streaming spec — harus diakumulasi sampai selesai.
+      const toolCallAccum = new Map<number, { id: string; name: string; args: string }>();
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed === 'data: [DONE]') continue;
+      while (true) {
+        armInactivityTimer(); // reset tiap menunggu potongan berikutnya — timeout = INACTIVITY, bukan total durasi
+        let readResult;
+        try {
+          readResult = await reader.read();
+        } catch (err) {
+          if (isInactivityAbort(err)) {
+            throw new Error(`SendaGo: Tidak ada data baru dari gateway selama lebih dari ${INACTIVITY_TIMEOUT_MS / 1000} detik (koneksi kemungkinan macet di tengah jalan). Coba ulangi permintaan.`);
+          }
+          throw err;
+        }
 
-        if (trimmed.startsWith('data: ')) {
-          try {
-            const data = JSON.parse(trimmed.slice(6));
-            const delta = data.choices?.[0]?.delta;
-            if (delta?.content) {
-              fullText += delta.content;
-              onChunk?.(delta.content);
-            }
-            if (Array.isArray(delta?.tool_calls)) {
-              for (const tc of delta.tool_calls) {
-                const idx = typeof tc.index === 'number' ? tc.index : 0;
-                const existing = toolCallAccum.get(idx) || { id: '', name: '', args: '' };
-                if (tc.id) existing.id = tc.id;
-                if (tc.function?.name) existing.name += tc.function.name;
-                if (tc.function?.arguments) existing.args += tc.function.arguments;
-                toolCallAccum.set(idx, existing);
+        const { done, value } = readResult;
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed === 'data: [DONE]') continue;
+
+          if (trimmed.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(trimmed.slice(6));
+              const delta = data.choices?.[0]?.delta;
+              if (delta?.content) {
+                fullText += delta.content;
+                onChunk?.(delta.content);
               }
+              if (Array.isArray(delta?.tool_calls)) {
+                for (const tc of delta.tool_calls) {
+                  const idx = typeof tc.index === 'number' ? tc.index : 0;
+                  const existing = toolCallAccum.get(idx) || { id: '', name: '', args: '' };
+                  if (tc.id) existing.id = tc.id;
+                  if (tc.function?.name) existing.name += tc.function.name;
+                  if (tc.function?.arguments) existing.args += tc.function.arguments;
+                  toolCallAccum.set(idx, existing);
+                }
+              }
+            } catch {
+              // ignore non-JSON stream chunks
             }
-          } catch {
-            // ignore non-JSON stream chunks
           }
         }
       }
+
+      const toolCalls: ToolCallData[] = Array.from(toolCallAccum.entries())
+        .sort(([a], [b]) => a - b)
+        .map(([idx, tc]) => ({
+          id: tc.id || `call_${idx}_${Date.now()}`,
+          type: 'function' as const,
+          function: { name: tc.name, arguments: tc.args }
+        }))
+        .filter(tc => tc.function.name);
+
+      return { text: fullText, toolCalls };
+    } finally {
+      disarmInactivityTimer();
+      signal?.removeEventListener('abort', onExternalAbort);
     }
-
-    const toolCalls: ToolCallData[] = Array.from(toolCallAccum.entries())
-      .sort(([a], [b]) => a - b)
-      .map(([idx, tc]) => ({
-        id: tc.id || `call_${idx}_${Date.now()}`,
-        type: 'function' as const,
-        function: { name: tc.name, arguments: tc.args }
-      }))
-      .filter(tc => tc.function.name);
-
-    return { text: fullText, toolCalls };
   }
 
   public resolveModelForPool(poolOverride?: string): string {

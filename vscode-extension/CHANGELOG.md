@@ -5,6 +5,28 @@ Versi sebelum 0.6.0 tidak memiliki catatan detail — lihat riwayat `.vsix` sebe
 sebagai referensi kasar (fitur Auto-Edit, Plan Mode, dan Model Routing Pool diperkenalkan
 bertahap dari 0.1.0 sampai 0.5.0).
 
+## 0.9.2 — Fix: Timeline Grouping for Single-Action Turns + Network Hang Timeout
+
+Follow-up to 0.9.1 based on user testing: the connected timeline from 0.9.1 still looked
+disconnected in practice, and a separate report showed the extension getting permanently
+stuck mid-task with no output and no error.
+
+### Fixed
+- **Timeline grouping didn't help when a model does one action per turn** (very common —
+  e.g. one `replace_in_file` call per turn with no narration text). The timeline was reset
+  on every new assistant bubble, so each turn's single toast ended up alone in its own group
+  of one, making the connecting line pointless. Now the timeline only resets after a bubble
+  that actually contains real text; an empty bubble (pure tool call, no narration) is
+  removed from the DOM entirely instead, so activity across many consecutive tool-only turns
+  stays visually connected in one continuous timeline — until the model actually says
+  something, which starts a fresh segment.
+- **`streamChat` had no timeout beyond the user's own Stop button.** If the 9Router gateway
+  or an upstream model provider hung mid-stream (network hiccup, provider outage), the
+  extension would wait forever with the loader spinning and no error — exactly what one
+  user hit on a long multi-file task. Both the initial request and each subsequent stream
+  chunk now have a 90-second inactivity timeout (reset on any new data), surfaced as a clear
+  error message instead of an indefinite silent hang.
+
 ## 0.9.1 — Cleaner, Connected Agent Activity Timeline
 
 Follow-up to 0.9.0 based on user feedback comparing SendaGo's chat UI to Claude Code's own

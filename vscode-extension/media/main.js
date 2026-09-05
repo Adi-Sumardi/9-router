@@ -737,10 +737,7 @@ window.addEventListener('message', (event) => {
     case 'done':
       stopThinkingProgress();
       if (agentLoopPill) agentLoopPill.style.display = 'none';
-      if (currentAssistantBubble) {
-        currentAssistantBubble.contentElem.innerHTML = renderCleanChat(currentAssistantBubble.rawText, true);
-        attachCodeBlockActions(currentAssistantBubble.contentElem);
-      }
+      finalizeCurrentBubble();
       currentAssistantBubble = null;
       setGeneratingState(false);
       break;
@@ -1076,11 +1073,15 @@ function createAssistantMessage() {
   const emptyState = document.getElementById('claude-empty-state');
   if (emptyState) emptyState.style.display = 'none';
 
-  // Bubble baru = batas segmen baru — reset wadah aktivitas supaya terminal block/toast
-  // BERIKUTNYA dibuat setelah bubble ini di DOM (bukan nyelip ke wadah lama yang posisinya
-  // sudah lewat), menjaga urutan tampil tetap sesuai kronologis eksekusi sebenarnya.
-  currentTimelineContainer = null;
-
+  // CATATAN: timeline TIDAK di-reset di sini (beda dari versi sebelumnya). Banyak model,
+  // terutama lewat native tool-calling, mengerjakan SATU aksi per giliran tanpa narasi teks
+  // sama sekali — kalau timeline direset tiap bubble baru dibuat, tiap toast/terminal block
+  // berakhir sendirian di wadahnya masing-masing dan garis penghubungnya jadi tidak kelihatan
+  // gunanya (grup isi 1 = tidak ada apa-apa yang perlu disambung). Timeline baru direset di
+  // finalizeCurrentBubble() — dan HANYA kalau bubble yang baru selesai itu benar-benar berisi
+  // teks. Bubble yang kosong (murni tool call) langsung dibuang dari DOM di sana, dan
+  // aktivitas berikutnya tetap menyambung ke timeline yang sama — jadi satu alur visual utuh
+  // sepanjang task, persis seperti timeline Claude Code.
   const msg = document.createElement('div');
   msg.className = 'message assistant';
   const content = document.createElement('div');
@@ -1357,8 +1358,23 @@ function resolveTerminalBlockEnd(termId, exitCode, durationMs, timedOut) {
 // lanjut ke step berikutnya, mau karena mau menyusun kesimpulan akhir, dsb.
 function finalizeCurrentBubble() {
   if (!currentAssistantBubble) return;
-  currentAssistantBubble.contentElem.innerHTML = renderCleanChat(currentAssistantBubble.rawText, true);
+  const html = renderCleanChat(currentAssistantBubble.rawText, true);
+
+  if (!html || !html.trim()) {
+    // Giliran ini tidak menghasilkan teks sama sekali (umum untuk native tool-calling murni
+    // — model cuma memanggil tool tanpa narasi). Buang bubble loading kosong ini dari DOM
+    // sepenuhnya, dan JANGAN reset timeline — biar toast/terminal block giliran berikutnya
+    // tetap menyambung ke timeline yang sama alih-alih terputus per giliran.
+    currentAssistantBubble.elem.remove();
+    currentAssistantBubble = null;
+    return;
+  }
+
+  currentAssistantBubble.contentElem.innerHTML = html;
   attachCodeBlockActions(currentAssistantBubble.contentElem);
+  // Bubble ini punya konten nyata — mulai segmen timeline baru setelah ini supaya
+  // aktivitas berikutnya tidak "menyambung ke atas" teks yang sudah final.
+  currentTimelineContainer = null;
 }
 
 function handleLoopStep(step, maxSteps, isLoop) {
