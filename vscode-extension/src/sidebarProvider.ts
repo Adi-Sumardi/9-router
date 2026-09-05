@@ -867,6 +867,18 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
         // Masukkan output eksekusi ke history untuk giliran berikutnya
         if (isNativeToolCall) {
           this.pushNativeToolResults(rawToolCalls, toolResultById, 'OK — tidak ada output.');
+          // BUG FIX: tidak seperti jalur legacy (tag teks) yang selalu menyertakan directive
+          // eksplisit "lanjutkan/jawab sekarang", protokol native tool-calling murni tidak
+          // punya nudge apa pun — sepenuhnya bergantung pada kecenderungan agentic model itu
+          // sendiri. Untuk model yang kurang agentic (umum di pool free/hybrid), ini membuat
+          // model terus memanggil tool baca (grep/read) berulang-ulang tanpa pernah menjawab
+          // atau memanggil task_done, sampai loop kehabisan step secara diam-diam. Tambahkan
+          // nudge ringan yang sama seperti jalur legacy — aman karena dikirim SETELAH semua
+          // pesan `role: 'tool'` sudah lengkap, jadi tidak merusak kontrak tool_calls/tool.
+          const nativeNudge = writeExecAllowed
+            ? `[Directive: Tool results above are ready. Do NOT repeat or echo them verbatim. In natural Indonesian, tell the user what was observed, then continue now — call the next tool if more work remains, or call task_done once everything is verified complete. Do not stay silent.]`
+            : `[Directive: The tool result above is now available. Do NOT repeat or echo it verbatim. Answer the user's question in natural Indonesian using this information now — only call another tool if genuinely still needed.]`;
+          this._history.push({ role: 'user', content: nativeNudge });
         } else {
           // Directive khusus mode non-autonomous (Chat/Plan, atau Agent tanpa autoExecute):
           // hasil di atas kemungkinan besar hanya dari grep/find/read (read-only), jadi model
@@ -879,6 +891,21 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
             role: 'user',
             content: `${feedbackContent}\n${directive}`
           });
+        }
+
+        // BUG FIX: kalau ini adalah iterasi terakhir yang diizinkan (currentStep sudah
+        // mencapai maxSteps), loop di bawah akan keluar lewat kondisi `while` TANPA pernah
+        // memberi model giliran lagi untuk merangkum/menjawab — sebelumnya ini membuat
+        // percakapan terlihat "diam" begitu saja di step terakhir (lihat screenshot bug
+        // report: macet di "Step 8/8: Menyempurnakan..." tanpa kesimpulan apa pun).
+        // Berhenti secara eksplisit di sini dengan pesan yang jelas, alih-alih membiarkan
+        // `while` gagal diam-diam.
+        if (currentStep >= maxSteps) {
+          this._view?.webview.postMessage({
+            type: 'assistantMessage',
+            text: `⚠️ **Batas langkah otonom tercapai (${maxSteps}/${maxSteps}).** SendaGo berhenti sebelum menyatakan tugas selesai — kemungkinan model masih ingin memeriksa lebih lanjut. Anda bisa lanjutkan dengan instruksi baru (mis. "lanjutkan"), atau naikkan "Maximum Autonomous Steps" di Settings untuk task yang lebih kompleks.`
+          });
+          break;
         }
 
         this._view?.webview.postMessage({

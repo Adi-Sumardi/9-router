@@ -5,6 +5,22 @@ Versi sebelum 0.6.0 tidak memiliki catatan detail — lihat riwayat `.vsix` sebe
 sebagai referensi kasar (fitur Auto-Edit, Plan Mode, dan Model Routing Pool diperkenalkan
 bertahap dari 0.1.0 sampai 0.5.0).
 
+## 0.8.2 — Fix: Autonomous Loop Silent at Last Step
+
+### Fixed
+- **Bug ditemukan saat testing user**: pada mode Claude Code/Agent dengan native
+  tool-calling (0.7.0+), agent bisa terjebak memanggil tool baca (grep/read) berulang
+  tanpa pernah menjawab atau memanggil `task_done`, sampai `maxAutonomousSteps` (default 8)
+  habis — dan begitu limit tercapai, percakapan berhenti TOTAL diam tanpa kesimpulan apa
+  pun (UI macet di badge "Step 8/8: Menyempurnakan..."). Dua akar penyebab:
+  1. Jalur native tool-calling tidak pernah menyertakan directive "lanjutkan/jawab
+     sekarang" seperti jalur tag-teks legacy — sepenuhnya bergantung pada kecenderungan
+     agentic model, yang tidak konsisten di model gratisan/hybrid. Sekarang jalur native
+     juga mendapat nudge yang sama setelah setiap hasil tool.
+  2. Kalau iterasi terakhir yang diizinkan masih meninggalkan pekerjaan tertunda, loop
+     keluar lewat kondisi `while` tanpa pemberitahuan. Sekarang dideteksi eksplisit dan
+     ditampilkan pesan jelas: "⚠️ Batas langkah otonom tercapai (N/N)..." alih-alih diam.
+
 ## 0.8.1 — Test & Lint Infrastructure (Maintenance)
 
 ### Added
