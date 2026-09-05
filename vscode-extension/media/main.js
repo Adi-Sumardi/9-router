@@ -56,6 +56,11 @@ const btnStopLoop = document.getElementById('btn-stop-loop');
 
 // State Variables
 let currentAssistantBubble = null;
+// Wadah "jalur aktivitas" yang menyambungkan terminal block/toast/badge antar satu bubble
+// jawaban dengan bubble berikutnya (garis penghubung + jarak rapat via CSS .agent-timeline),
+// alih-alih kotak-kotak lepas dengan gap besar — dibuat lazily & di-reset tiap bubble baru
+// (lihat createAssistantMessage) supaya urutannya selalu benar di DOM.
+let currentTimelineContainer = null;
 let currentMode = 'claude-code';
 let currentAttachments = []; // Array of { name, path, content }
 let isGenerating = false;
@@ -651,8 +656,8 @@ window.addEventListener('message', (event) => {
       handleLoopStep(message.step, message.maxSteps, message.isLoop);
       break;
 
-    case 'observingOutput':
-      handleObservingOutput(message.message);
+    case 'startFinalSummary':
+      handleStartFinalSummary();
       break;
 
     case 'taskCompleted':
@@ -1055,9 +1060,26 @@ function getActiveThinkingMessage() {
   return THINKING_MESSAGES[Math.min(currentThinkingIndex, THINKING_MESSAGES.length - 1)];
 }
 
+// Ambil (atau buat) wadah aktivitas yang sedang aktif untuk terminal block/toast/badge.
+// Dipanggil lazily oleh setiap penulis aktivitas — kalau belum ada atau sudah "usang"
+// (mis. chat di-reset), bikin baru dan taruh di akhir messagesContainer.
+function getOrCreateTimeline() {
+  if (!currentTimelineContainer || !currentTimelineContainer.isConnected) {
+    currentTimelineContainer = document.createElement('div');
+    currentTimelineContainer.className = 'agent-timeline';
+    messagesContainer.appendChild(currentTimelineContainer);
+  }
+  return currentTimelineContainer;
+}
+
 function createAssistantMessage() {
   const emptyState = document.getElementById('claude-empty-state');
   if (emptyState) emptyState.style.display = 'none';
+
+  // Bubble baru = batas segmen baru — reset wadah aktivitas supaya terminal block/toast
+  // BERIKUTNYA dibuat setelah bubble ini di DOM (bukan nyelip ke wadah lama yang posisinya
+  // sudah lewat), menjaga urutan tampil tetap sesuai kronologis eksekusi sebenarnya.
+  currentTimelineContainer = null;
 
   const msg = document.createElement('div');
   msg.className = 'message assistant';
@@ -1284,7 +1306,7 @@ function renderTerminalBlockStart(termId, command, desc) {
     </div>
     <pre class="terminal-stdout-view"></pre>
   `;
-  messagesContainer.appendChild(block);
+  getOrCreateTimeline().appendChild(block);
   messagesContainer.scrollTop = messagesContainer.scrollHeight;
 
   const header = block.querySelector('.terminal-block-header');
@@ -1330,48 +1352,47 @@ function resolveTerminalBlockEnd(termId, exitCode, durationMs, timedOut) {
   }
 }
 
-function handleLoopStep(step, maxSteps, isLoop) {
-  if (agentLoopPill && agentStepText) {
-    if (isLoop) {
-      agentLoopPill.style.display = 'inline-flex';
-      agentStepText.textContent = `Step ${step}/${maxSteps}`;
-
-      // Finalize previous assistant bubble so step 2 creates a fresh bubble below terminal/badge
-      if (currentAssistantBubble) {
-        currentAssistantBubble.contentElem.innerHTML = renderCleanChat(currentAssistantBubble.rawText, true);
-        attachCodeBlockActions(currentAssistantBubble.contentElem);
-      }
-
-      const badge = document.createElement('div');
-      badge.className = 'claude-loop-badge';
-      const loopText = step <= 2 ? 'Menganalisis...' : (step < maxSteps ? 'Memeriksa kembali...' : 'Menyempurnakan...');
-      badge.innerHTML = `<span>⚡</span> <span><strong>Step ${step}/${maxSteps}:</strong> ${loopText}</span>`;
-      messagesContainer.appendChild(badge);
-
-      // Fresh assistant bubble for the next step
-      currentAssistantBubble = createAssistantMessage();
-      messagesContainer.scrollTop = messagesContainer.scrollHeight;
-    } else {
-      agentLoopPill.style.display = 'none';
-    }
-  }
+// Finalisasi bubble assistant yang sedang aktif jadi HTML statis (bukan lagi mode
+// streaming), dipanggil setiap kali sebuah "segmen" percakapan berakhir: mau karena loop
+// lanjut ke step berikutnya, mau karena mau menyusun kesimpulan akhir, dsb.
+function finalizeCurrentBubble() {
+  if (!currentAssistantBubble) return;
+  currentAssistantBubble.contentElem.innerHTML = renderCleanChat(currentAssistantBubble.rawText, true);
+  attachCodeBlockActions(currentAssistantBubble.contentElem);
 }
 
-function handleObservingOutput(msg) {
-  const text = msg || 'Memeriksa kembali...';
-  const pulse = document.createElement('div');
-  pulse.className = 'claude-writing-pulse';
-  pulse.innerHTML = `<span>🧠 ${escapeHtml(text)}</span><div class="shimmer-bar"></div>`;
-  messagesContainer.appendChild(pulse);
+function handleLoopStep(step, maxSteps, isLoop) {
+  if (!isLoop) return;
+  // Sengaja TIDAK lagi menampilkan badge "Step N/M" terpisah — dengan safety-net step
+  // yang sekarang jauh lebih besar (task kompleks bisa jalan puluhan langkah), counter
+  // seperti itu terasa mekanis ("kaku") dan berulang alih-alih mengalir natural. Bubble
+  // baru di bawah ini sudah punya shimmer loader sendiri yang menandakan AI masih bekerja
+  // — itu cukup, mengikuti alur yang lebih mirip timeline Claude Code (tanpa hitungan step).
+  finalizeCurrentBubble();
+  currentAssistantBubble = createAssistantMessage();
+  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+}
+
+function handleStartFinalSummary() {
+  // Loop otonom berhenti (stagnasi terdeteksi atau safety-net step tercapai) dan backend
+  // meminta satu giliran terakhir TANPA tool supaya AI merangkum hasilnya dalam bahasa
+  // natural — finalize bubble lama & siapkan bubble baru untuk teks kesimpulan tsb.
+  finalizeCurrentBubble();
+
+  const badge = document.createElement('div');
+  badge.className = 'claude-loop-badge';
+  badge.innerHTML = `<span>📝</span> <span><strong>Menyusun kesimpulan...</strong></span>`;
+  getOrCreateTimeline().appendChild(badge);
+
+  currentAssistantBubble = createAssistantMessage();
   messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
 
 function handleTaskCompleted(summary) {
-  if (agentLoopPill) agentLoopPill.style.display = 'none';
   const doneElem = document.createElement('div');
   doneElem.className = 'claude-done-badge';
   doneElem.innerHTML = `<span>✔</span> <span>${escapeHtml(summary || 'Tugas selesai dan diverifikasi otonom.')}</span>`;
-  messagesContainer.appendChild(doneElem);
+  getOrCreateTimeline().appendChild(doneElem);
   messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
 
@@ -1379,7 +1400,7 @@ function appendAutoExecToast(icon, text) {
   const toast = document.createElement('div');
   toast.className = 'auto-exec-toast';
   toast.innerHTML = `<span class="toast-icon">${icon}</span><span class="toast-text">${escapeHtml(text)}</span>`;
-  messagesContainer.appendChild(toast);
+  getOrCreateTimeline().appendChild(toast);
   messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
 

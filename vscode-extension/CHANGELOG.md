@@ -5,6 +5,45 @@ Versi sebelum 0.6.0 tidak memiliki catatan detail — lihat riwayat `.vsix` sebe
 sebagai referensi kasar (fitur Auto-Edit, Plan Mode, dan Model Routing Pool diperkenalkan
 bertahap dari 0.1.0 sampai 0.5.0).
 
+## 0.9.1 — Cleaner, Connected Agent Activity Timeline
+
+Follow-up to 0.9.0 based on user feedback comparing SendaGo's chat UI to Claude Code's own
+clean, sequential timeline — SendaGo's felt "kaku dan tidak berurutan" (rigid, disjointed)
+by comparison.
+
+### Changed
+- Removed the redundant duplicate progress indicators that fired on every autonomous loop
+  step: the numeric `"⚡ Step N/M: ..."` badge and the separate `"🧠 Memeriksa kembali..."`
+  pulse said the same thing twice per step. The new assistant bubble already shows its own
+  shimmer loader while waiting, so neither was adding information — just noise, and looked
+  especially mechanical now that the step ceiling is 50 instead of 8.
+- Terminal blocks, auto-exec toasts, and completion badges that occur between two AI
+  responses are now grouped into one connected `.agent-timeline` container (shared left
+  border + tight spacing) instead of floating as separate boxes with large gaps — closer
+  to how Claude Code visually chains a tool call to its result.
+
+## 0.9.0 — Dynamic Stopping: Stagnation Detection Instead of a Hard Step Wall
+
+Follow-up to 0.8.2 based on user testing: a hardcoded "step limit reached" warning box
+was still the wrong fix — it papered over the symptom instead of the real problem, and
+capped genuinely complex multi-step tasks at an arbitrary number.
+
+### Changed
+- `sendago.maxAutonomousSteps` default raised from 8 to **50**, and reframed as a
+  last-resort safety ceiling rather than a target step count. Description updated to
+  clarify this. Raise it further in Settings for very complex tasks.
+- The loop no longer relies on the step counter as its primary stopping signal. It now
+  fingerprints every turn's requested actions (`computeActionSignature`) and detects
+  **stagnation**: if the exact same tool call (same grep query, same command, etc.)
+  repeats 3 times in a row with no new progress, the loop stops — regardless of how many
+  steps remain. A task where every step is genuinely different can run far longer without
+  ever hitting this.
+- Whenever the loop stops early (stagnation OR the safety ceiling), it now runs one final
+  no-tools turn (`runFinalSummaryTurn`) asking the model to summarize, in natural
+  Indonesian, what was accomplished and what remains — so the user always gets a real
+  conclusion instead of a raw warning box. Falls back to a plain-text notice only if that
+  final call itself returns nothing.
+
 ## 0.8.2 — Fix: Autonomous Loop Silent at Last Step
 
 ### Fixed

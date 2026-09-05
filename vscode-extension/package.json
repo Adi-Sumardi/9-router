@@ -2,7 +2,7 @@
   "name": "sendago-ai-assistant",
   "displayName": "SendaGo AI — 9Router Assistant (Claude Code & Antigravity Edition)",
   "description": "Autonomous Claude Code & Cline Style AI Coding Assistant: Surgical Replace, Grep & Glob Search, Persistent Shell, and Multi-Model Fusion powered by 9Router",
-  "version": "0.8.2",
+  "version": "0.9.1",
   "private": true,
   "license": "UNLICENSED",
   "publisher": "sendago",
@@ -176,8 +176,8 @@
         },
         "sendago.maxAutonomousSteps": {
           "type": "number",
-          "default": 8,
-          "description": "Maximum autonomous agent iteration steps per request"
+          "default": 50,
+          "description": "Safety-net ceiling for autonomous agent steps per request — NOT a target step count. The loop stops earlier on its own via task completion or stagnation detection (repeated identical tool calls); raise this further for very complex multi-step tasks."
         },
         "sendago.temperature": {
           "type": "number",

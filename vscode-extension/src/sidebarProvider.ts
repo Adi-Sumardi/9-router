@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { NineRouterClient, ChatMessage, ToolCallData } from './routerClient';
-import { AgentEngine, AgentMode } from './agentEngine';
+import { AgentEngine, AgentMode, FileEditAction, FileReplaceAction, GrepAction, FindFilesAction, ReadFileAction, CommandAction, ImageAction } from './agentEngine';
 import { AgentTools } from './agentTools';
 import { SessionManager } from './sessionManager';
 import { getToolDefinitionsForMode } from './toolSchemas';
@@ -15,7 +15,7 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
   private _currentMode: AgentMode = 'claude-code';
   private _abortController: AbortController | null = null;
   private _autoExecute: boolean = true;
-  private _maxAutonomousSteps: number = 8;
+  private _maxAutonomousSteps: number = 50;
   private _untrustedNoticeShown: boolean = false;
   private _projectPolicyNoticeShown: boolean = false;
   private _sessionId: string = SessionManager.generateId();
@@ -29,7 +29,7 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
   ) {
     const config = vscode.workspace.getConfiguration('sendago');
     this._autoExecute = config.get<boolean>('autoExecute', true);
-    this._maxAutonomousSteps = config.get<number>('maxAutonomousSteps', 8);
+    this._maxAutonomousSteps = config.get<number>('maxAutonomousSteps', 50);
     this.resetHistory();
   }
 
@@ -433,6 +433,73 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Fingerprint dari SEMUA aksi yang diminta model pada satu turn — dipakai untuk
+   * mendeteksi stagnasi (model mengulang tool call PERSIS SAMA berkali-kali tanpa
+   * progres nyata, mis. grep/find dengan query yang identik). Ini pengganti "hitung
+   * step" sebagai sinyal berhenti utama: task kompleks yang genuinely butuh banyak
+   * langkah BERBEDA tidak akan pernah kena ini, karena signature-nya selalu berubah.
+   */
+  private computeActionSignature(
+    replaces: FileReplaceAction[],
+    edits: FileEditAction[],
+    greps: GrepAction[],
+    finds: FindFilesAction[],
+    reads: ReadFileAction[],
+    commands: CommandAction[],
+    images: ImageAction[]
+  ): string {
+    const parts: string[] = [];
+    greps.forEach(g => parts.push(`grep:${g.query}:${g.include || ''}:${g.path || ''}`));
+    finds.forEach(f => parts.push(`find:${f.pattern}`));
+    reads.forEach(r => parts.push(`read:${r.filePath}:${r.startLine ?? ''}:${r.endLine ?? ''}`));
+    commands.forEach(c => parts.push(`cmd:${c.command}`));
+    replaces.forEach(r => parts.push(`replace:${r.filePath}:${r.searchContent.slice(0, 60)}`));
+    edits.forEach(e => parts.push(`edit:${e.filePath}:${e.newContent.length}`));
+    images.forEach(i => parts.push(`image:${i.filePath}`));
+    return parts.sort().join('|');
+  }
+
+  /**
+   * Giliran terakhir TANPA tool — dipanggil begitu loop berhenti karena stagnasi atau
+   * mentok safety-net, supaya user SELALU dapat kesimpulan bahasa natural dari AI
+   * (apa yang sudah dikerjakan/ditemukan, dan langkah lanjutan kalau ada), bukan cuma
+   * kotak peringatan mentah. `reason` disisipkan ke directive supaya modelnya paham
+   * KENAPA harus berhenti sekarang dan bisa menjelaskannya ke user kalau relevan.
+   */
+  private async runFinalSummaryTurn(targetModel: string, controller: AbortController, reason: string): Promise<void> {
+    this._history.push({
+      role: 'user',
+      content: `[Directive: Stop calling any tools now. ${reason} In natural Indonesian, summarize clearly what has been accomplished/found so far, your conclusion, and any remaining next steps the user should take. Respond with plain text only — no tool calls, no <sendago_*> tags.]`
+    });
+
+    this._view?.webview.postMessage({ type: 'startFinalSummary' });
+
+    let summaryText = '';
+    try {
+      await this._client.streamChat(
+        this._history,
+        targetModel,
+        (chunk) => {
+          summaryText += chunk;
+          this._view?.webview.postMessage({ type: 'chunk', text: chunk });
+        },
+        controller.signal
+        // Sengaja TIDAK kirim `tools` — memaksa provider membalas teks biasa.
+      );
+    } catch {
+      // Kalau giliran ringkasan ini sendiri gagal, jangan biarkan seluruh turn crash —
+      // fallback teks di bawah tetap memastikan user tidak melihat layar kosong.
+    }
+
+    if (!summaryText.trim()) {
+      summaryText = 'Proses otonom dihentikan karena tidak ada progres baru yang terdeteksi setelah beberapa langkah. Silakan lanjutkan dengan instruksi yang lebih spesifik jika masih ada pekerjaan yang perlu diselesaikan.';
+      this._view?.webview.postMessage({ type: 'chunk', text: summaryText });
+    }
+
+    this._history.push({ role: 'assistant', content: summaryText });
+  }
+
+  /**
    * Pangkas log eksekusi tool lama agar context window tetap hemat dan responsif (Auto-Compaction)
    */
   private compactHistoryIfLarge(): void {
@@ -549,7 +616,12 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
     this._abortController = controller;
 
     let currentStep = 0;
+    // `maxSteps` sekarang murni safety-net terakhir (default besar), BUKAN target harian —
+    // mekanisme berhenti yang sebenarnya adalah task_done ATAU deteksi stagnasi di bawah,
+    // supaya task yang genuinely kompleks & butuh banyak langkah nyata tidak dipotong paksa.
     const maxSteps = this._maxAutonomousSteps;
+    let lastActionSignature: string | null = null;
+    let repeatStreak = 0;
 
     try {
       while (currentStep < maxSteps) {
@@ -864,55 +936,82 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
           break;
         }
 
-        // Masukkan output eksekusi ke history untuk giliran berikutnya
+        // Deteksi stagnasi LEBIH DULU (sebelum menyusun nudge/directive) — kalau aksi yang
+        // diminta model turn ini PERSIS SAMA dengan turn sebelumnya (mis. grep/find query
+        // identik berkali-kali tanpa progres), itu tanda model terjebak "memeriksa lagi"
+        // bukan mengerjakan sesuatu yang baru. Ini pengganti "hitung step" sebagai sinyal
+        // berhenti utama — task kompleks yang tiap langkahnya genuinely berbeda TIDAK akan
+        // pernah kena ini, berapa pun banyaknya langkah.
+        const actionSignature = this.computeActionSignature(replaces, edits, greps, finds, reads, commands, images);
+        if (actionSignature && actionSignature === lastActionSignature) {
+          repeatStreak++;
+        } else {
+          repeatStreak = 0;
+        }
+        lastActionSignature = actionSignature;
+
+        const isStagnant = repeatStreak >= 2;
+        // Safety-net terakhir kalau benar-benar tidak ada tanda stagnasi TAPI jatah step
+        // (default besar, bisa dinaikkan lagi di Settings untuk task yang sangat kompleks)
+        // sudah habis.
+        const stepLimitHit = currentStep >= maxSteps;
+        const shouldStopNow = isStagnant || stepLimitHit;
+
+        // Masukkan output eksekusi ke history untuk giliran berikutnya. Kalau kita akan
+        // berhenti sekarang, JANGAN sisipkan nudge "lanjutkan/panggil tool lagi" — itu
+        // kontradiktif dengan directive "berhenti & rangkum" yang dikirim runFinalSummaryTurn
+        // sesudahnya, dan bisa membingungkan model yang kurang agentic.
         if (isNativeToolCall) {
           this.pushNativeToolResults(rawToolCalls, toolResultById, 'OK — tidak ada output.');
-          // BUG FIX: tidak seperti jalur legacy (tag teks) yang selalu menyertakan directive
-          // eksplisit "lanjutkan/jawab sekarang", protokol native tool-calling murni tidak
-          // punya nudge apa pun — sepenuhnya bergantung pada kecenderungan agentic model itu
-          // sendiri. Untuk model yang kurang agentic (umum di pool free/hybrid), ini membuat
-          // model terus memanggil tool baca (grep/read) berulang-ulang tanpa pernah menjawab
-          // atau memanggil task_done, sampai loop kehabisan step secara diam-diam. Tambahkan
-          // nudge ringan yang sama seperti jalur legacy — aman karena dikirim SETELAH semua
-          // pesan `role: 'tool'` sudah lengkap, jadi tidak merusak kontrak tool_calls/tool.
-          const nativeNudge = writeExecAllowed
-            ? `[Directive: Tool results above are ready. Do NOT repeat or echo them verbatim. In natural Indonesian, tell the user what was observed, then continue now — call the next tool if more work remains, or call task_done once everything is verified complete. Do not stay silent.]`
-            : `[Directive: The tool result above is now available. Do NOT repeat or echo it verbatim. Answer the user's question in natural Indonesian using this information now — only call another tool if genuinely still needed.]`;
-          this._history.push({ role: 'user', content: nativeNudge });
+          if (!shouldStopNow) {
+            // BUG FIX: tidak seperti jalur legacy (tag teks) yang selalu menyertakan directive
+            // eksplisit "lanjutkan/jawab sekarang", protokol native tool-calling murni tidak
+            // punya nudge apa pun — sepenuhnya bergantung pada kecenderungan agentic model.
+            // Untuk model yang kurang agentic (umum di pool free/hybrid), ini membuat model
+            // terus memanggil tool baca berulang tanpa pernah menjawab/memanggil task_done.
+            const nativeNudge = writeExecAllowed
+              ? `[Directive: Tool results above are ready. Do NOT repeat or echo them verbatim. In natural Indonesian, tell the user what was observed, then continue now — call the next tool if more work remains, or call task_done once everything is verified complete. Do not stay silent.]`
+              : `[Directive: The tool result above is now available. Do NOT repeat or echo it verbatim. Answer the user's question in natural Indonesian using this information now — only call another tool if genuinely still needed.]`;
+            this._history.push({ role: 'user', content: nativeNudge });
+          }
         } else {
           // Directive khusus mode non-autonomous (Chat/Plan, atau Agent tanpa autoExecute):
           // hasil di atas kemungkinan besar hanya dari grep/find/read (read-only), jadi model
           // diarahkan untuk LANGSUNG menjawab pakai info tsb — bukan didorong terus memanggil
           // tool tulis/eksekusi seolah sedang di autonomous loop.
-          const directive = writeExecAllowed
-            ? `[Directive: The tool executions finished. Do NOT repeat, quote, or echo the command output or logs above. In natural Indonesian, tell the user what was observed and immediately emit the next <sendago_replace>, <sendago_cmd>, <sendago_edit>, or <sendago_done>.]`
-            : `[Directive: The read-only result above (grep/find/read) is now available. Do NOT repeat or echo it verbatim. Answer the user's question in natural Indonesian using this information now — only request another tool if genuinely still needed.]`;
+          const directive = shouldStopNow
+            ? ''
+            : writeExecAllowed
+              ? `[Directive: The tool executions finished. Do NOT repeat, quote, or echo the command output or logs above. In natural Indonesian, tell the user what was observed and immediately emit the next <sendago_replace>, <sendago_cmd>, <sendago_edit>, or <sendago_done>.]`
+              : `[Directive: The read-only result above (grep/find/read) is now available. Do NOT repeat or echo it verbatim. Answer the user's question in natural Indonesian using this information now — only request another tool if genuinely still needed.]`;
           this._history.push({
             role: 'user',
             content: `${feedbackContent}\n${directive}`
           });
         }
 
-        // BUG FIX: kalau ini adalah iterasi terakhir yang diizinkan (currentStep sudah
-        // mencapai maxSteps), loop di bawah akan keluar lewat kondisi `while` TANPA pernah
-        // memberi model giliran lagi untuk merangkum/menjawab — sebelumnya ini membuat
-        // percakapan terlihat "diam" begitu saja di step terakhir (lihat screenshot bug
-        // report: macet di "Step 8/8: Menyempurnakan..." tanpa kesimpulan apa pun).
-        // Berhenti secara eksplisit di sini dengan pesan yang jelas, alih-alih membiarkan
-        // `while` gagal diam-diam.
-        if (currentStep >= maxSteps) {
-          this._view?.webview.postMessage({
-            type: 'assistantMessage',
-            text: `⚠️ **Batas langkah otonom tercapai (${maxSteps}/${maxSteps}).** SendaGo berhenti sebelum menyatakan tugas selesai — kemungkinan model masih ingin memeriksa lebih lanjut. Anda bisa lanjutkan dengan instruksi baru (mis. "lanjutkan"), atau naikkan "Maximum Autonomous Steps" di Settings untuk task yang lebih kompleks.`
-          });
+        if (isStagnant) {
+          await this.runFinalSummaryTurn(
+            targetModel,
+            controller,
+            'You have repeated the exact same tool call multiple times in a row without making new progress.'
+          );
           break;
         }
 
-        this._view?.webview.postMessage({
-          type: 'observingOutput',
-          message: 'Memeriksa kembali...'
-        });
+        if (stepLimitHit) {
+          await this.runFinalSummaryTurn(
+            targetModel,
+            controller,
+            `You have used all ${maxSteps} available autonomous steps for this task.`
+          );
+          break;
+        }
 
+        // Catatan: tidak ada lagi postMessage progress generik di sini (dulu 'observingOutput')
+        // — itu duplikat dengan badge "Step N/M" yang juga sudah dihapus dari sisi client.
+        // Bubble baru di step berikutnya sudah punya shimmer loader sendiri sebagai indikator
+        // "masih bekerja", jadi tidak perlu indikator terpisah yang berulang & terasa kaku.
         await new Promise(r => setTimeout(r, 400));
       }
 

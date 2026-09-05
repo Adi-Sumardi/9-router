@@ -606,6 +606,25 @@ body {
   color: #10b981;
 }
 
+/* Agent Activity Timeline — mengelompokkan terminal block/toast/badge yang terjadi di
+   antara dua jawaban AI jadi satu jalur visual yang tersambung (garis vertikal + jarak
+   rapat), alih-alih kotak-kotak lepas dengan gap besar seperti bubble chat biasa. Ini yang
+   bikin urutan eksekusi kelihatan mengalir (mirip timeline Claude Code), bukan "kaku". */
+.agent-timeline {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 2px 0 2px 4px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border-soft);
+}
+
+.agent-timeline > * {
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+
 /* Claude Code Terminal Output Block */
 .claude-terminal-block {
   margin: 10px 0;
