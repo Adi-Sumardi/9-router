@@ -620,6 +620,15 @@ body {
   color: #10b981;
 }
 
+/* Ruang kosong dinamis di bawah daftar pesan — memberi "landasan" scroll supaya prompt
+   yang baru dikirim bisa benar-benar naik ke atas viewport (tanpa ini, pesan terakhir
+   secara fisik tidak mungkin di-scroll melewati batas scrollHeight - clientHeight).
+   Tingginya dihitung ulang di updateBottomSpacer() dan menyusut seiring jawaban tumbuh. */
+.chat-bottom-spacer {
+  flex-shrink: 0;
+  pointer-events: none;
+}
+
 /* Agent Activity Timeline — mengelompokkan terminal block/toast/badge yang terjadi di
    antara dua jawaban AI jadi satu jalur visual yang tersambung (garis vertikal + jarak
    rapat), alih-alih kotak-kotak lepas dengan gap besar seperti bubble chat biasa. Ini yang

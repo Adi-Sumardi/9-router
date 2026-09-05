@@ -5,6 +5,23 @@ Versi sebelum 0.6.0 tidak memiliki catatan detail — lihat riwayat `.vsix` sebe
 sebagai referensi kasar (fitur Auto-Edit, Plan Mode, dan Model Routing Pool diperkenalkan
 bertahap dari 0.1.0 sampai 0.5.0).
 
+## 0.11.1 — Fix: The Actual Reason the Prompt Never Stayed at the Top
+
+Three previous attempts (0.9.3, 0.9.4, 0.9.5) treated this as a timing/race problem and
+kept failing. It wasn't timing at all — it was a physical scroll limit.
+
+### Fixed
+- A browser can only scroll a container to `scrollHeight - clientHeight`. The message just
+  sent is the **last** element in the list, so no amount of `scrollIntoView({block:'start'})`
+  can lift it to the top of the viewport — there is simply nothing below it to fill the
+  screen. Every earlier fix was scrolling correctly and then being clamped back by the
+  browser, which looked identical to "the anchor lost a race".
+- Added a dynamic bottom spacer (the approach ChatGPT/Claude.ai use): on send, enough empty
+  space is reserved below the message for it to reach the top, then that space shrinks
+  automatically as the response and tool activity fill it in, so no empty gap is left over
+  at the end. `scrollIntoView` was also replaced with a direct `scrollTo` computed from the
+  element's offset within the scroll container, which behaves deterministically in a webview.
+
 ## 0.11.0 — Five Community Skills Baked Into the System Prompt
 
 Added condensed, faithful directives distilled from five external skills into

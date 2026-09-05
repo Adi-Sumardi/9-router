@@ -109,6 +109,62 @@ function isViewportNearBottom() {
   return messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight < threshold;
 }
 
+// AKAR MASALAH "prompt selalu nempel di bawah" yang berulang kali gagal diperbaiki:
+// bukan soal race condition timing, tapi keterbatasan fisik scroll. Browser hanya bisa
+// scroll sampai `scrollHeight - clientHeight`. Pesan yang baru dikirim itu elemen PALING
+// BAWAH, jadi berapa kali pun kita panggil scrollIntoView({block:'start'}), dia tidak
+// mungkin naik ke atas viewport — tidak ada konten di bawahnya yang bisa mengisi layar.
+// Solusi yang dipakai ChatGPT/Claude.ai: sisipkan spacer kosong di paling bawah supaya
+// ada ruang scroll, lalu susutkan spacer itu seiring jawaban mengisi ruang tersebut.
+let anchoredMsgElem = null;
+const BOTTOM_SPACER_ID = 'sendago-bottom-spacer';
+
+function getBottomSpacer() {
+  let spacer = document.getElementById(BOTTOM_SPACER_ID);
+  if (!spacer) {
+    spacer = document.createElement('div');
+    spacer.id = BOTTOM_SPACER_ID;
+    spacer.className = 'chat-bottom-spacer';
+    spacer.style.height = '0px';
+  }
+  // Elemen lain (timeline/bubble/toast) di-append belakangan, jadi spacer harus
+  // dikembalikan ke posisi terakhir setiap kali dipakai.
+  if (messagesContainer.lastElementChild !== spacer) {
+    messagesContainer.appendChild(spacer);
+  }
+  return spacer;
+}
+
+/** Offset sebuah elemen relatif terhadap konten scrollable messagesContainer. */
+function offsetWithinMessages(elem) {
+  const elemTop = elem.getBoundingClientRect().top;
+  const containerTop = messagesContainer.getBoundingClientRect().top;
+  return (elemTop - containerTop) + messagesContainer.scrollTop;
+}
+
+// Sisakan ruang persis secukupnya supaya pesan yang di-anchor bisa berada di atas viewport,
+// lalu susut otomatis begitu jawaban/tool-call mengisi ruang di bawahnya — tidak menyisakan
+// area kosong menganga di akhir percakapan.
+function updateBottomSpacer() {
+  const spacer = getBottomSpacer();
+  if (!anchoredMsgElem || !anchoredMsgElem.isConnected) {
+    spacer.style.height = '0px';
+    return;
+  }
+  const spacerHeight = spacer.offsetHeight;
+  const contentHeight = messagesContainer.scrollHeight - spacerHeight;
+  const heightBelowAnchor = contentHeight - offsetWithinMessages(anchoredMsgElem);
+  const needed = messagesContainer.clientHeight - heightBelowAnchor - 24;
+  spacer.style.height = Math.max(0, needed) + 'px';
+}
+
+function scrollAnchorToTop(elem) {
+  messagesContainer.scrollTo({
+    top: Math.max(0, offsetWithinMessages(elem) - 8),
+    behavior: 'smooth'
+  });
+}
+
 // "Kunci" anchor aktif selama satu turn — dipasang oleh sendMessage() ke elemen prompt yang
 // baru dikirim. Selama terkunci, autoScrollIfNearBottom() TIDAK boleh ikut lompat ke bawah
 // sama sekali, apa pun status "near bottom"-nya. Tanpa kunci ini ada race condition nyata:
@@ -119,22 +175,25 @@ function isViewportNearBottom() {
 // besar peluang chunk pertama menang balapan sebelum anchor sempat jalan.
 let scrollAnchorLocked = false;
 
+// Dipanggil setiap kali ada konten baru masuk (chunk/toast/terminal block/bubble) —
+// selalu perbarui spacer dulu supaya ruang scroll menyusut seiring jawaban tumbuh.
 function autoScrollIfNearBottom() {
+  updateBottomSpacer();
   if (scrollAnchorLocked) return;
   if (isViewportNearBottom()) {
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
   }
 }
 
-// Jadwalkan scrollIntoView ke `targetElem` di frame berikutnya. TIDAK mengatur
-// scrollAnchorLocked di sini — caller WAJIB set `scrollAnchorLocked = true` SENDIRI
-// sebelum memanggil ini (idealnya sebelum elemen apa pun ditambahkan ke DOM sama sekali),
-// karena fungsi lain seperti appendUserMessage()/createAssistantMessage() punya
-// auto-scroll masing-masing yang akan langsung lompat ke bawah kalau lock belum aktif
-// saat mereka dipanggil — itulah bug yang sempat lolos di percobaan sebelumnya.
+// Pasang anchor ke pesan yang baru dikirim, siapkan ruang scroll-nya, lalu naikkan ke atas
+// viewport. Dijalankan di frame berikutnya supaya tinggi elemen sudah final saat dihitung.
+// Caller WAJIB sudah set `scrollAnchorLocked = true` SEBELUM elemen apa pun di-append,
+// karena appendUserMessage()/createAssistantMessage() punya auto-scroll masing-masing.
 function scheduleAnchorScrollTo(targetElem) {
+  anchoredMsgElem = targetElem;
   requestAnimationFrame(() => {
-    targetElem.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    updateBottomSpacer();
+    scrollAnchorToTop(targetElem);
   });
 }
 
@@ -496,6 +555,7 @@ drawerBtnNew?.addEventListener('click', () => {
 
 function startNewSession() {
   sessionsDrawer.style.display = 'none';
+  anchoredMsgElem = null; // elemen lama ikut terhapus di bawah — jangan sisakan anchor menggantung
   messagesContainer.innerHTML = '';
   actionsPanel.style.display = 'none';
   actionsPanel.innerHTML = '';
@@ -936,6 +996,7 @@ function renderSessionsList(sessions, currentId) {
 }
 
 function loadSessionIntoChat(session) {
+  anchoredMsgElem = null;
   messagesContainer.innerHTML = '';
   actionsPanel.style.display = 'none';
   actionsPanel.innerHTML = '';
@@ -970,6 +1031,7 @@ function loadSessionIntoChat(session) {
 }
 
 function resetChatToWelcome() {
+  anchoredMsgElem = null;
   messagesContainer.innerHTML = `
     <div id="claude-empty-state" class="claude-empty-state">
       <div class="empty-headline">
