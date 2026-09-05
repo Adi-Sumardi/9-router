@@ -5,6 +5,25 @@ Versi sebelum 0.6.0 tidak memiliki catatan detail — lihat riwayat `.vsix` sebe
 sebagai referensi kasar (fitur Auto-Edit, Plan Mode, dan Model Routing Pool diperkenalkan
 bertahap dari 0.1.0 sampai 0.5.0).
 
+## 0.13.1 — Fix: Token Saver Left the Agent Stuck in Exploration, Never Writing Code
+
+Regression from 0.12.0 reported by the user: after entering a prompt, code was no longer
+being executed.
+
+### Fixed
+- The token saver gave the light model **only read-only tools**, on the reasoning that this
+  made it structurally impossible for it to author code. That backfired: a model using
+  native tool-calling can only act through the tools it is given, so once a turn fell to
+  the light model it had no way to signal "time to write" and could only keep reading. The
+  anti-degradation guard never fired because it watches for a write action, which the model
+  could no longer produce. The agent stayed in exploration and never got to the edits.
+- The light model now receives the **full** tool set, so it can express intent to write; the
+  guard then discards that attempt and re-runs the step on the primary model. Code quality
+  is protected by the guard, not by removing the tools.
+- Added a cap of 2 consecutive light steps. Even without any write action, control returns
+  to the primary model after that, so a long exploration can't drift indefinitely on the
+  cheap model and feel slow to start real work.
+
 ## 0.13.0 — Animated SendaGo Mascot as the "Working" Indicator
 
 The grey shimmer dot made the UI look frozen while code was being written or a command was

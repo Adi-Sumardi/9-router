@@ -5,7 +5,7 @@ import { NineRouterClient, ChatMessage, ToolCallData } from './routerClient';
 import { AgentEngine, AgentMode, FileEditAction, FileReplaceAction, GrepAction, FindFilesAction, ReadFileAction, CommandAction, ImageAction } from './agentEngine';
 import { AgentTools } from './agentTools';
 import { SessionManager, sanitizeMessagesForHistory } from './sessionManager';
-import { getToolDefinitionsForMode, getReadOnlyToolDefinitionsForMode } from './toolSchemas';
+import { getToolDefinitionsForMode } from './toolSchemas';
 import { ProjectSettings, PermissionMode } from './projectSettings';
 
 export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
@@ -702,6 +702,8 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
     // Langkah pertama selalu pakai model utama: di sinilah task dipahami & rencana disusun.
     let nextStepIsLight = false;
     let lightModelNoticeShown = false;
+    let consecutiveLightSteps = 0;
+    const MAX_CONSECUTIVE_LIGHT_STEPS = 2;
 
     // Permission mode: .sendago/settings.json milik REPO (bisa di-commit, berlaku untuk
     // semua kontributor) menang atas setting personal `sendago.autoExecute` di VS Code —
@@ -776,6 +778,13 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
           });
         }
 
+        // PENTING: model ringan tetap diberi tool LENGKAP. Versi sebelumnya hanya memberi
+        // tool baca dengan maksud "mustahil dia menulis kode" — tapi efeknya justru fatal:
+        // model yang memakai native tool-calling hanya bisa bertindak lewat tool yang
+        // tersedia, jadi begitu giliran jatuh ke model ringan, dia tidak punya cara untuk
+        // menyatakan "sekarang saatnya menulis" dan hanya bisa membaca terus. Agent jadi
+        // nyangkut di eksplorasi dan kodenya tidak pernah dieksekusi. Kualitas kode tetap
+        // dijaga oleh pengaman di bawah, bukan dengan mencabut tool-nya.
         const runStepAttempt = (light: boolean) => this.streamChatWithFallback(
           light ? modelPlan.lightChain : modelChain,
           light ? lightChainState : modelChainState,
@@ -783,26 +792,21 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
             this._view?.webview.postMessage({ type: 'chunk', text: chunk });
           },
           controller,
-          // Model ringan TIDAK diberi tool tulis/eksekusi sama sekali — secara struktural
-          // mustahil dia yang menulis kode.
-          light
-            ? getReadOnlyToolDefinitionsForMode(this._currentMode)
-            : getToolDefinitionsForMode(this._currentMode)
+          getToolDefinitionsForMode(this._currentMode)
         );
 
         let attempt = await runStepAttempt(useLightModel);
         let parsed = this.parseActionsFromResponse(attempt.toolCalls, attempt.text);
 
-        // PENGAMAN ANTI-TURUN-KUALITAS: kalau langkah ini ternyata sudah waktunya menulis
-        // atau menjalankan sesuatu, model ringan tidak boleh yang mengerjakannya. Tool
-        // tulis memang tidak diberikan ke dia, tapi dia masih bisa mengemit tag teks
-        // <sendago_edit>/<sendago_cmd> lewat jalur fallback — jadi hasilnya dibuang dan
-        // langkah yang sama diulang memakai model utama.
+        // PENGAMAN ANTI-TURUN-KUALITAS: begitu model ringan menyatakan langkah ini perlu
+        // menulis/menjalankan sesuatu, hasilnya dibuang dan langkah yang sama diulang
+        // memakai model utama — jadi yang menulis kode selalu model terbaik, sementara
+        // langkah eksplorasi yang jumlahnya jauh lebih banyak tetap murah.
         if (useLightModel && this.hasWriteOrExecAction(parsed)) {
           this._view?.webview.postMessage({ type: 'resetCurrentBubble' });
           this._view?.webview.postMessage({
             type: 'assistantMessage',
-            text: '↩️ Langkah ini ternyata perlu menulis/menjalankan sesuatu — dikembalikan ke model utama agar kualitas kode tetap terjaga.'
+            text: '↩️ Langkah ini perlu menulis/menjalankan sesuatu — dikembalikan ke model utama agar kualitas kode tetap terjaga.'
           });
           attempt = await runStepAttempt(false);
           parsed = this.parseActionsFromResponse(attempt.toolCalls, attempt.text);
@@ -1103,7 +1107,13 @@ export class SendaGoSidebarProvider implements vscode.WebviewViewProvider {
         // atau ada yang gagal, balik lagi ke model utama karena butuh penalaran serius.
         const didWriteOrExecute = replaces.length > 0 || edits.length > 0 || commands.length > 0 || images.length > 0;
         const didReadOnlyOnly = (greps.length > 0 || finds.length > 0 || reads.length > 0) && !didWriteOrExecute;
-        nextStepIsLight = didReadOnlyOnly && !stepHadFailure;
+
+        // Batasi berapa giliran beruntun yang boleh dipegang model ringan. Tanpa ini, task
+        // yang eksplorasinya panjang bisa berlarut-larut di model murah dan terasa lambat
+        // "mulai mengerjakan"; setelah batas ini, kembalikan kemudi ke model utama.
+        consecutiveLightSteps = useLightModel ? consecutiveLightSteps + 1 : 0;
+        const lightBudgetLeft = consecutiveLightSteps < MAX_CONSECUTIVE_LIGHT_STEPS;
+        nextStepIsLight = didReadOnlyOnly && !stepHadFailure && lightBudgetLeft;
 
         const actionSignature = this.computeActionSignature(replaces, edits, greps, finds, reads, commands, images);
         if (actionSignature && actionSignature === lastActionSignature) {
